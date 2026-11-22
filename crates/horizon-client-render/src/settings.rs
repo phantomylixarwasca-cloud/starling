@@ -315,7 +315,8 @@ impl Default for Settings {
             toggle_crouch: false,
             toggle_sprint: false,
             auto_jump: false,
-            language: "en_us".into(),
+            // Spanish is the default for the Android Spanish edition; player choices still persist.
+            language: if cfg!(target_os = "android") { "es_es" } else { "en_us" }.into(),
             force_unicode: false,
             japanese_glyphs: false,
             chat_visibility: 0,

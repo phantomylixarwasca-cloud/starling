@@ -67,7 +67,7 @@ public final class LauncherActivity extends Activity {
         } else if (file != null) {
             final AlertDialog copying =
                     new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                            .setMessage("Handing the file to Starling...")
+                            .setMessage("Importando el archivo en Starling...")
                             .setCancelable(false)
                             .show();
             receive(this, file, new Runnable() {
@@ -113,7 +113,7 @@ public final class LauncherActivity extends Activity {
         }
         // The game says why it starts again (the world's mods, the launcher...); else, generic.
         setContentView(new RestartView(this,
-                message != null && !message.isEmpty() ? message : "Starting Starling again…",
+                message != null && !message.isEmpty() ? message : "Reiniciando Starling…",
                 restartLook(this)));
         View decor = getWindow().getDecorView();
         if (Build.VERSION.SDK_INT >= 30) {
@@ -250,7 +250,7 @@ public final class LauncherActivity extends Activity {
             text("STARLING", cx * u, titleY * u, 24f * u,
                     Typeface.create("sans-serif-medium", Typeface.BOLD), textColor);
             float subY = titleY + 32f;
-            text("RUST EDITION  •  ANDROID LAUNCHER", cx * u, subY * u, 11.5f * u,
+            text("EDICIÓN RUST  •  LANZADOR PARA ANDROID", cx * u, subY * u, 11.5f * u,
                     Typeface.create("sans-serif-medium", Typeface.NORMAL), alpha(muted, 0.9f));
             // Android is switching processes, so there is no percentage to report.
             float t = (SystemClock.uptimeMillis() - start) / 1000f;

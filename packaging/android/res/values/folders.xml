@@ -1,3 +1,3 @@
 <resources>
-    <string name="open_folder_failed">No file manager could open the folder. Open the Files app and choose Starling in its menu.</string>
+    <string name="open_folder_failed">No se pudo abrir la carpeta con ningún administrador de archivos. Abre la aplicación Archivos y selecciona Starling en su menú.</string>
 </resources>

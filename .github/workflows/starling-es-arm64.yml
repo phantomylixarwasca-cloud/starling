@@ -1,0 +1,54 @@
+name: Starling Español - APK Android ARM64
+
+# En un repositorio propio/fork, permite compilar una APK de prueba sin las claves
+# de firma privadas de Starling. No modifica la versión oficial instalada.
+on:
+  workflow_dispatch:
+  push:
+    branches: [espanol]
+
+permissions:
+  contents: read
+
+jobs:
+  apk-espanol:
+    name: Compilar APK ARM64 en español
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Instalar Android SDK, herramientas y NDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+            'build-tools;35.0.0' 'platforms;android-36' 'ndk;28.2.13676358' > /dev/null
+      - name: Instalar Rust y cargo-ndk
+        run: |
+          bash tools/ci/rustup_install.sh --profile minimal --component rust-src --target aarch64-linux-android
+          cargo install cargo-ndk --version 3.5.4 --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: starling-es-arm64
+      - name: Preparar librerías nativas de la API de mods
+        run: python3 tools/android_native_sdk.py prepare
+      - name: Compilar y firmar APK de prueba en español
+        env:
+          RUSTFLAGS: -C prefer-dynamic
+        run: |
+          python3 packaging/android/build_apk.py \
+            --abi arm64-v8a --profile quick --preview --zip
+      - name: Guardar APK descargable
+        uses: actions/upload-artifact@v4
+        with:
+          name: Starling-0.9.0-Espanol-ARM64
+          path: |
+            target/android/starling-preview-0.9.0-arm64-v8a.apk
+            target/android/starling-preview-0.9.0-arm64-v8a.apk.zip
+          if-no-files-found: error
+          retention-days: 90

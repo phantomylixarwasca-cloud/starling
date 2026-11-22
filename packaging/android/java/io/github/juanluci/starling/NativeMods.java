@@ -67,8 +67,8 @@ final class NativeMods {
             // None counted.
         }
         if (count >= TRIES) {
-            setAside(dir, "The build with native mods closed twice before it showed, so "
-                    + "Starling started without it.");
+            setAside(dir, "La compilación con mods nativos se cerró dos veces antes de mostrarse, así que "
+                    + "Starling se inició sin ella.");
             return null;
         }
         write(starts, Integer.toString(count + 1));
@@ -134,7 +134,7 @@ final class NativeMods {
 
     /** The build could not be loaded: set aside, saying why. */
     static void failed(Context context, String why) {
-        setAside(dir(context), "The build with native mods could not be loaded (" + why
+        setAside(dir(context), "No se pudo cargar la compilación con mods nativos (" + why
                 + "), so Starling started without it.");
     }
 
