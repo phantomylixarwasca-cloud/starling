@@ -110,6 +110,8 @@ impl Launcher {
     }
 
     pub(super) fn new(home: PathBuf) -> Self {
+        // Launcher UI only: translate displayed Android controls and menus to Spanish.
+        crate::ha_launcher::client::ui_theme::set_launcher_spanish(true);
         // Upgrade existing installations and pre-verify structure transforms in the background
         // so pressing Play launches immediately without main-thread I/O stalls.
         let cleanup_home = home.clone();

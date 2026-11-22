@@ -78,6 +78,53 @@ pub enum Face {
     Mono,
 }
 
+/// Only the Android launcher process enables this: in-game text is never altered.
+static ANDROID_LAUNCHER_SPANISH: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_launcher_spanish(enabled: bool) {
+    ANDROID_LAUNCHER_SPANISH.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The desktop language table is reused for shared UI terms; Android-specific
+/// labels override it. Exact matches keep profile names and user content intact.
+fn launcher_localized<'a>(input: &'a str) -> std::borrow::Cow<'a, str> {
+    if !ANDROID_LAUNCHER_SPANISH.load(std::sync::atomic::Ordering::Relaxed) {
+        return std::borrow::Cow::Borrowed(input);
+    }
+    static STRINGS: std::sync::OnceLock<std::collections::HashMap<String, String>> =
+        std::sync::OnceLock::new();
+    let strings = STRINGS.get_or_init(|| {
+        let mut desktop: std::collections::HashMap<String, String> = serde_json::from_str(
+            include_str!("../../../launcher/lang/es.json")
+        ).expect("The Spanish desktop locale must be valid JSON");
+        let android: std::collections::HashMap<String, String> = serde_json::from_str(
+            include_str!("ha_launcher/es_ui.json")
+        ).expect("The Spanish Android UI locale must be valid JSON");
+        desktop.extend(android);
+        desktop
+    });
+    if let Some(value) = strings.get(input) {
+        return std::borrow::Cow::Borrowed(value.as_str());
+    }
+    // Common dynamic counters and status labels.
+    if let Some(profile) = input.strip_prefix("Profile ") {
+        if profile.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            return std::borrow::Cow::Owned(format!("Perfil {profile}"));
+        }
+    }
+    if let Some(details) = input.strip_prefix("Minecraft 26.3 • Profile ") {
+        return std::borrow::Cow::Owned(format!("Minecraft 26.3 • Perfil {details}"));
+    }
+    if let Some(count) = input.strip_prefix("Packs (") {
+        return std::borrow::Cow::Owned(format!("Paquetes ({count}"));
+    }
+    if let Some(name) = input.strip_prefix("Downloading ") {
+        return std::borrow::Cow::Owned(format!("Descargando {name}"));
+    }
+    std::borrow::Cow::Borrowed(input)
+}
+
 /// Vector icons used by the Material You 3 Android launcher navigation rail,
 /// top bar, and progress controls.
 static ANDROID_DPI_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -833,6 +880,8 @@ impl<'a> Ui<'a> {
     }
 
     pub fn fit_text(&self, face: Face, size: f32, text: &str, width: f32) -> String {
+        let translated = launcher_localized(text);
+        let text = translated.as_ref();
         if text.is_empty() || width <= 0.0 {
             return String::new();
         }
@@ -1337,6 +1386,8 @@ impl<'a> Ui<'a> {
     // ---- text ----
     /// The advance of `text` in dp.
     pub fn measure(&self, face: Face, size: f32, text: &str) -> f32 {
+        let translated = launcher_localized(text);
+        let text = translated.as_ref();
         let px = (size * self.density * 4.0).round() / 4.0;
         with_cache(self.atlas, |c| {
             let font = c.fonts.face(face);
@@ -1367,6 +1418,8 @@ impl<'a> Ui<'a> {
         color: u32,
         text: &str,
     ) -> f32 {
+        let translated = launcher_localized(text);
+        let text = translated.as_ref();
         let px = (size * self.density * 4.0).round() / 4.0;
         let real = color >> 24 != 0;
         let (x0, y0) = (self.px_x(x), self.px_y(y));
