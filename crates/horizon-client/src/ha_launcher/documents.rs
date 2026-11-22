@@ -306,6 +306,55 @@ pub fn document_result(
         notice(format!("Import failed: {error}"), false);
     }
 }
+/// Android's document cache and the active game profile can live on different
+/// filesystems. A plain rename fails with EXDEV (os error 18) in that case.
+/// Copy into the *destination filesystem* first and atomically rename the
+/// completed temporary file, so a partial mod is never visible to the game.
+fn finish_import(staged: &std::path::Path, target: &std::path::Path) -> Result<()> {
+    match std::fs::rename(staged, target) {
+        Ok(()) => Ok(()),
+        Err(error) if error.raw_os_error() == Some(18) => {
+            let parent = target.parent().ok_or("Invalid import destination")?;
+            let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+            let (temporary, mut output) = (0..64)
+                .find_map(|attempt| {
+                    let temporary =
+                        parent.join(format!(".starling-import-{stamp}-{attempt}.part"));
+                    match std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&temporary)
+                    {
+                        Ok(file) => Some(Ok((temporary, file))),
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                        Err(error) => Some(Err(error)),
+                    }
+                })
+                .ok_or("Could not allocate temporary import file")??;
+            let copied = (|| -> Result<()> {
+                let mut input = std::fs::File::open(staged)?;
+                std::io::copy(&mut input, &mut output)?;
+                output.sync_all()?;
+                Ok(())
+            })();
+            drop(output);
+            if let Err(error) = copied {
+                let _ = std::fs::remove_file(&temporary);
+                return Err(error);
+            }
+            if let Err(error) = std::fs::rename(&temporary, target) {
+                let _ = std::fs::remove_file(&temporary);
+                return Err(error.into());
+            }
+            // At this point the installed mod is complete. Cache cleanup
+            // failing must not turn a successful import into an error.
+            let _ = std::fs::remove_file(staged);
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn stage(request: Request, mut input: std::fs::File, name: String) -> Result<()> {
     if let Some(target_dir) = request.target_dir {
         crate::ha_launcher::document_store::validate_entry_name(&name)?;
@@ -454,7 +503,7 @@ fn stage(request: Request, mut input: std::fs::File, name: String) -> Result<()>
                 false,
             );
         } else {
-            std::fs::rename(&staged, &target)?;
+            finish_import(&staged, &target)?;
             imported(
                 format!(
                     "Imported {} into {}. Enable it in game settings.",
@@ -529,7 +578,7 @@ pub fn resolve(choice: Choice) {
                 }
             }
         }
-        std::fs::rename(&c.staged, &c.target)?;
+        finish_import(&c.staged, &c.target)?;
         Ok(())
     })();
     match result {
