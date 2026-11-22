@@ -1,0 +1,278 @@
+//! Experimental native, animated GeckoLib/Bedrock entity renderer for Fapcraft.
+//! Models/animations are read from the installed `sexmod.hmod`; no second vanilla
+//! entity, passenger, item_display or Java runtime is involved in drawing.
+//!
+//! Locomotion uses LivingRenderState. Original Java game logic and its interaction
+//! state machine have *not* been ported; this is the actual renderer bridge.
+use mod_api::{BlockEntityDrawContext, CubeFace, EntityRenderState, EntityRenderer, EntityRenderers};
+use serde_json::Value;
+use std::{collections::HashMap, fs::File, io::Read, path::PathBuf, sync::{Arc, OnceLock}};
+
+struct Character { id: &'static str, geo: &'static str, animation: &'static str, alias: &'static str }
+const CHARACTERS: [Character; 11] = [
+    Character { id: "jenny", geo: "geo/jenny/jennydressed.geo.json", animation: "animations/jenny/jenny.animation.json", alias: "jenny" },
+    Character { id: "ellie", geo: "geo/ellie/dressed.geo.json", animation: "animations/ellie/ellie.animation.json", alias: "ellie" },
+    Character { id: "bia", geo: "geo/bia/biadressed.geo.json", animation: "animations/bia/bia.animation.json", alias: "bia" },
+    Character { id: "slime", geo: "geo/slime/dressed.geo.json", animation: "animations/slime/slime.animation.json", alias: "slime" },
+    Character { id: "bee", geo: "geo/bee/bee.geo.json", animation: "animations/bee/bee.animation.json", alias: "bee" },
+    Character { id: "luna", geo: "geo/cat/cat.geo.json", animation: "animations/cat/cat.animation.json", alias: "cat" },
+    Character { id: "allie", geo: "geo/allie/allie.geo.json", animation: "animations/allie/allie.animation.json", alias: "allie" },
+    Character { id: "kobold", geo: "geo/kobold/kobold.geo.json", animation: "animations/kobold/kobold.animation.json", alias: "kobold" },
+    Character { id: "goblin", geo: "geo/goblin/goblin.geo.json", animation: "animations/goblin/goblin.animation.json", alias: "goblin" },
+    Character { id: "galath", geo: "geo/galath/galath.geo.json", animation: "animations/galath/galath.animation.json", alias: "galath" },
+    Character { id: "manglelie", geo: "geo/manglelie/manglelie.geo.json", animation: "animations/manglelie/manglelie.animation.json", alias: "manglelie" },
+];
+
+#[derive(Clone, Copy, Debug)]
+struct Key { time: f32, value: [f32; 3], easing: Easing }
+#[derive(Clone, Copy, Debug)]
+enum Easing { Linear, SineIn, SineOut, SineBoth, QuadIn, QuadOut, QuadBoth }
+#[derive(Default)]
+struct Channels { rotation: Vec<Key>, position: Vec<Key>, scale: Vec<Key> }
+struct Clip { duration: f32, bones: HashMap<String, Channels> }
+struct BoxGeometry { origin: [f32; 3], size: [f32; 3], inflation: f32, pivot: Option<[f32; 3]>, rotation: [f32; 3], uv: [Option<[f32; 4]>; 6] }
+struct Bone { name: String, pivot: [f32; 3], rotation: [f32; 3], children: Vec<usize>, cubes: Vec<BoxGeometry> }
+struct Rig { sprite: String, bones: Vec<Bone>, roots: Vec<usize>, idle: Option<Clip>, walk: Option<Clip>, run: Option<Clip> }
+
+fn triplet(v: Option<&Value>, default: [f32; 3]) -> [f32; 3] {
+    let Some(array) = v.and_then(Value::as_array) else { return default };
+    if array.len() < 3 { return default; }
+    std::array::from_fn(|i| array[i].as_f64().unwrap_or(default[i] as f64) as f32)
+}
+fn parse_track(value: Option<&Value>) -> Vec<Key> {
+    let Some(value) = value else { return Vec::new() };
+    fn key(time: f32, raw: &Value) -> Option<Key> {
+        let vec = if raw.is_array() { raw } else { raw.get("vector")? };
+        let easing = match raw.get("easing").and_then(Value::as_str).unwrap_or("linear") {
+            "easeInSine" => Easing::SineIn, "easeOutSine" => Easing::SineOut,
+            "easeInOutSine" => Easing::SineBoth, "easeInQuad" => Easing::QuadIn,
+            "easeOutQuad" => Easing::QuadOut, "easeInOutQuad" => Easing::QuadBoth,
+            _ => Easing::Linear,
+        };
+        Some(Key { time, value: triplet(Some(vec), [0.0; 3]), easing })
+    }
+    if value.is_array() || value.get("vector").is_some() {
+        return key(0.0, value).into_iter().collect();
+    }
+    let mut out = Vec::new();
+    if let Some(map) = value.as_object() {
+        for (t, v) in map {
+            if let Ok(t) = t.parse::<f32>() {
+                if let Some(key) = key(t, v) { out.push(key) }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.time.total_cmp(&b.time));
+    out
+}
+fn clip(source: &Value, alias: &str, suffix: &str) -> Option<Clip> {
+    let name = format!("animation.{alias}.{suffix}");
+    let v = source.get("animations")?.get(&name)?;
+    let duration = v.get("animation_length").and_then(Value::as_f64).unwrap_or(1.0) as f32;
+    let mut bones = HashMap::new();
+    for (name, data) in v.get("bones")?.as_object()? {
+        bones.insert(name.clone(), Channels {
+            rotation: parse_track(data.get("rotation")),
+            position: parse_track(data.get("position")),
+            scale: parse_track(data.get("scale")),
+        });
+    }
+    Some(Clip { duration: duration.max(0.001), bones })
+}
+fn ease(a: Easing, x: f32) -> f32 {
+    match a {
+        Easing::Linear => x,
+        Easing::SineIn => 1.0 - (x * std::f32::consts::FRAC_PI_2).cos(),
+        Easing::SineOut => (x * std::f32::consts::FRAC_PI_2).sin(),
+        Easing::SineBoth => -(std::f32::consts::PI * x).cos().mul_add(0.5, -0.5),
+        Easing::QuadIn => x * x,
+        Easing::QuadOut => x * (2.0 - x),
+        Easing::QuadBoth => if x < 0.5 { 2.0*x*x } else { 1.0 - (-2.0*x+2.0).powi(2)*0.5 },
+    }
+}
+fn sample(keys: &[Key], time: f32, default: [f32; 3]) -> [f32; 3] {
+    let Some(first) = keys.first() else { return default };
+    if keys.len() == 1 || time <= first.time { return first.value; }
+    for interval in keys.windows(2) {
+        let [a, b] = [interval[0], interval[1]];
+        if time <= b.time {
+            let t = ease(b.easing, ((time - a.time) / (b.time-a.time).max(0.0001)).clamp(0.0, 1.0));
+            return std::array::from_fn(|i| a.value[i] + (b.value[i] - a.value[i]) * t);
+        }
+    }
+    keys.last().map_or(default, |k| k.value)
+}
+fn load_rig(zip: &mut zip::ZipArchive<File>, character: &Character) -> Result<Rig, String> {
+    fn json(zip: &mut zip::ZipArchive<File>, name: &str) -> Result<Value, String> {
+        let mut text = String::new();
+        zip.by_name(name).map_err(|e| format!("{name}: {e}"))?
+            .read_to_string(&mut text).map_err(|e| format!("{name}: {e}"))?;
+        serde_json::from_str(&text).map_err(|e| format!("{name}: {e}"))
+    }
+    let geometry = json(zip, &format!("assets/sexmod/{}", character.geo))?;
+    let anim = json(zip, &format!("assets/sexmod/{}", character.animation))?;
+    let obj = geometry.get("minecraft:geometry").and_then(Value::as_array)
+        .and_then(|a| a.first()).ok_or("No minecraft:geometry in original asset")?;
+    let description = obj.get("description").ok_or("Missing geometry description")?;
+    let tex_w = description.get("texture_width").and_then(Value::as_f64).unwrap_or(64.0) as f32;
+    let tex_h = description.get("texture_height").and_then(Value::as_f64).unwrap_or(64.0) as f32;
+    let mut bones = Vec::new();let mut parents = Vec::new();
+    for bone in obj.get("bones").and_then(Value::as_array).ok_or("Missing geometry bones")? {
+        let name = bone.get("name").and_then(Value::as_str).unwrap_or("").to_owned();
+        if name.is_empty() { continue; }
+        let mut cubes = Vec::new();
+        if let Some(parts) = bone.get("cubes").and_then(Value::as_array) {
+            for c in parts {
+                let origin = triplet(c.get("origin"), [0.0;3]);
+                let size = triplet(c.get("size"), [0.0;3]);
+                if size.iter().any(|x| !x.is_finite() || *x < 0.0) { continue; }
+                let mut uv = [None;6];
+                if let Some(face) = c.get("uv").and_then(Value::as_object) {
+                    for (idx, direction) in ["down","up","north","south","west","east"].iter().enumerate() {
+                        if let Some(info) = face.get(*direction) {
+                            let at = info.get("uv").and_then(Value::as_array);
+                            let sz = info.get("uv_size").and_then(Value::as_array);
+                            if let (Some(at), Some(sz)) = (at, sz) {
+                                let num = |v: &Value| v.as_f64().unwrap_or(0.0) as f32;
+                                if at.len() == 2 && sz.len() == 2 {
+                                    let (u, v) = (num(&at[0]),num(&at[1]));
+                                    let (du,dv) = (num(&sz[0]),num(&sz[1]));
+                                    uv[idx] = Some([u*16.0/tex_w,v*16.0/tex_h,(u+du)*16.0/tex_w,(v+dv)*16.0/tex_h]);
+                                }
+                            }
+                        }
+                    }
+                }
+                cubes.push(BoxGeometry {
+                    origin,size,inflation:c.get("inflate").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+                    pivot:c.get("pivot").map(|v| triplet(Some(v),[0.0;3])),
+                    rotation:triplet(c.get("rotation"),[0.0;3]),uv,
+                });
+            }
+        }
+        parents.push(bone.get("parent").and_then(Value::as_str).map(str::to_owned));
+        bones.push(Bone{name,pivot:triplet(bone.get("pivot"),[0.0;3]),
+            rotation:triplet(bone.get("rotation"),[0.0;3]),children:Vec::new(),cubes});
+    }
+    let names: HashMap<String, usize> = bones.iter().enumerate().map(|(i,b)|(b.name.clone(),i)).collect();
+    let mut roots=Vec::new();
+    for (i,parent) in parents.iter().enumerate(){
+        if let Some(p)=parent.as_ref().and_then(|name|names.get(name).copied()).filter(|p|*p!=i) {
+            bones[p].children.push(i);
+        } else {roots.push(i);}
+    }
+    Ok(Rig { sprite:format!("sexmod:entity/fapcraft_native/{}", character.id),bones,roots,
+        idle:clip(&anim, character.alias,"idle")
+            .or_else(||clip(&anim, character.alias,"summon_wait"))
+            .or_else(||clip(&anim, character.alias,"rich_normal")),
+        walk:clip(&anim, character.alias,"walk")
+            .or_else(||clip(&anim, character.alias,"running")),
+        run:clip(&anim, character.alias,"run")
+            .or_else(||clip(&anim, character.alias,"running"))
+            .or_else(||clip(&anim, character.alias,"fastwalk")) })
+}
+
+static RIGS: OnceLock<Vec<Option<Rig>>> = OnceLock::new();
+fn rigs() -> &'static Vec<Option<Rig>> {
+    RIGS.get_or_init(|| {
+        let root = std::env::var_os("HORIZON_HOME").map(PathBuf::from).unwrap_or_default();
+        let path = root.join("horizon-mods/sexmod.hmod");
+        let attempt = (|| -> Result<Vec<Option<Rig>>, String> {
+            let file=File::open(&path).map_err(|e|format!("{}: {e}",path.display()))?;
+            let mut archive=zip::ZipArchive::new(file).map_err(|e|e.to_string())?;
+            Ok(CHARACTERS.iter().map(|character|{
+                match load_rig(&mut archive,character) {
+                    Ok(rig)=>Some(rig),
+                    Err(error)=>{log::warn!("Fapcraft native renderer {}: {error}",character.id);None}
+                }
+            }).collect())
+        })();
+        attempt.unwrap_or_else(|error|{
+            log::warn!("Fapcraft native renderer cannot read package: {error}");
+            (0..CHARACTERS.len()).map(|_|None).collect()
+        })
+    })
+}
+fn rotate(draw: &mut dyn BlockEntityDrawContext, deg: [f32;3], pivot: [f32;3]) {
+    let pivot=pivot.map(|v|v/16.0);
+    // GeckoLib/Bedrock bones rotate in local X,Y,Z axes; a sign inversion on
+    // the Y axis aligns the engine's body-forward convention.
+    for (axis, angle) in [([0.0,0.0,1.0],deg[2]),([0.0,1.0,0.0],-deg[1]),([1.0,0.0,0.0],deg[0])] {
+        if angle.abs()>0.0001 {draw.rotate_about(axis,angle,pivot);}
+    }
+}
+fn visit(rig: &Rig, index: usize, clip: Option<&Clip>, time: f32, draw:&mut dyn BlockEntityDrawContext, depth: usize) {
+    if depth > 64 {return;}
+    let Some(bone)=rig.bones.get(index) else {return;};
+    draw.push();
+    let channels=clip.and_then(|c|c.bones.get(&bone.name));
+    if let Some(c)=channels {
+        let pos=sample(&c.position,time,[0.0;3]);
+        draw.translate(pos.map(|v|v/16.0));
+    }
+    let rot=channels.map_or([0.0;3],|c|sample(&c.rotation,time,[0.0;3]));
+    rotate(draw,std::array::from_fn(|i|bone.rotation[i]+rot[i]),bone.pivot);
+    if let Some(c)=channels {
+        if !c.scale.is_empty() {
+            let scale=sample(&c.scale,time,[1.0;3]);
+            draw.translate(bone.pivot.map(|v|v/16.0));draw.scale(scale);
+            draw.translate(bone.pivot.map(|v|-v/16.0));
+        }
+    }
+    for c in &bone.cubes {
+        if c.uv.iter().all(Option::is_none){continue;}
+        let faces=std::array::from_fn(|idx|c.uv[idx].map(|uv|CubeFace::new(&rig.sprite).with_uv(uv)));
+        let low=std::array::from_fn(|i|c.origin[i]-c.inflation);
+        let high=std::array::from_fn(|i|c.origin[i]+c.size[i]+c.inflation);
+        if c.rotation.iter().any(|v|v.abs()>0.001) {
+            draw.push();rotate(draw,c.rotation,c.pivot.unwrap_or(bone.pivot));
+            let _=draw.cube(low,high,faces,0xFFFFFF);draw.pop();
+        } else {let _=draw.cube(low,high,faces,0xFFFFFF);}
+    }
+    for child in &bone.children {visit(rig,*child,clip,time,draw,depth+1);}
+    draw.pop();
+}
+
+struct Renderer(usize);
+impl EntityRenderer for Renderer {
+    fn submit(&self,entity:&EntityRenderState,draw:&mut dyn BlockEntityDrawContext)->Result<(),String> {
+        let Some(rig)=rigs().get(self.0).and_then(Option::as_ref) else {
+            // When the package isn't installed, the entity type is not present;
+            // returning Ok without geometry avoids rendering a wrong vanilla model.
+            return Ok(());
+        };
+        let speed=entity.living.map_or(0.0,|l|l.walk_animation_speed);
+        let clip=if speed>0.60 {rig.run.as_ref().or(rig.walk.as_ref())}
+            else if speed>0.055 {rig.walk.as_ref().or(rig.run.as_ref())}
+            else {rig.idle.as_ref()};
+        let time=clip.map_or(0.0,|c| (entity.age * 0.05 * if speed>0.65 {1.4} else {1.0}).rem_euclid(c.duration));
+        draw.push();
+        if let Some(living)=entity.living {
+            draw.rotate_about([0.0,1.0,0.0],-living.body_rot,[0.0;3]);
+            draw.scale([living.scale,living.scale,living.scale]);
+            if living.death_time>0.0 {draw.rotate_about([0.0,0.0,1.0],(living.death_time*4.5).min(90.0),[0.0,0.6,0.0]);}
+        } else {draw.rotate_about([0.0,1.0,0.0],-entity.yaw,[0.0;3]);}
+        for root in &rig.roots {visit(rig,*root,clip,time,draw,0);}
+        draw.pop();
+        Ok(())
+    }
+}
+
+/// Registers the 11 unique Fapcraft entity types in the core's real living
+/// renderer registry; each renderer is used only when that entity type exists.
+pub(super) fn install(registry: &mut dyn EntityRenderers) {
+    for (index, character) in CHARACTERS.iter().enumerate() {
+        registry.register(format!("sexmod:{}",character.id),Arc::new(Renderer(index)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn easing_and_track_interpolation() {
+        let keys=parse_track(Some(&serde_json::json!({"0.0":{"vector":[0,0,0]},"1.0":{"vector":[10,0,0]}})));
+        assert!((sample(&keys,0.5,[0.0;3])[0]-5.0).abs()<0.001);
+        assert_eq!(CHARACTERS.len(),11);
+    }
+}

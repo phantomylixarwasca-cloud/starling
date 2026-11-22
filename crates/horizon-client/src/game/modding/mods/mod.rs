@@ -675,6 +675,8 @@ pub(super) fn register_entity_renderers(role: ExecutionRole) {
     }
     let mut registry = mod_api::EntityRendererRegistry::default();
     Game::native_register_entity_renderers(&RegistrationContext::new(), &mut registry);
+    // Fapcraft: render the 11 own entity types with native animated GeckoLib geometry.
+    super::fapcraft_native::install(&mut registry);
     super::native_entity_renderers::register(registry.into_renderers());
 }
 /// The native mods' particle providers (`native_register_particle_providers`) and render groups

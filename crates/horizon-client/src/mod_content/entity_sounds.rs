@@ -36,6 +36,8 @@ pub(super) fn mod_entity_row(
     for (key, value) in [
         ("shadow_radius", t.shadow_radius),
         ("shadow_strength", t.shadow_strength),
+        ("width", t.width),
+        ("height", t.height),
     ] {
         if let Some(value) = value {
             fields.insert(key.into(), to_raw_value(&value).map_err(fail)?);

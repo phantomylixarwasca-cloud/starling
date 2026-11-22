@@ -19,6 +19,12 @@ pub struct EntityType {
     pub shadow_radius: Option<f32>,
     #[serde(default, deserialize_with = "deserialize_shadow")]
     pub shadow_strength: Option<f32>,
+    /// Optional collision width for a distinct living entity type, in blocks.
+    #[serde(default)]
+    pub width: Option<f32>,
+    /// Optional collision height for a distinct living entity type, in blocks.
+    #[serde(default)]
+    pub height: Option<f32>,
     /// a thrown type's: one of the mod's own items, which throws it. A
     /// living type has none.
     #[serde(default)]
@@ -92,6 +98,13 @@ impl EntityType {
 
 impl EntityType {
     pub(super) fn validate_thrown_attachments_and_sounds(&self, name: &str) -> Result<(), String> {
+        for (key, value, max) in [("width", self.width, 8.0f32), ("height", self.height, 16.0f32)] {
+            if let Some(v) = value {
+                if !self.is_living() || !v.is_finite() || v < 0.1 || v > max {
+                    return Err(format!("{name}: {key} must be a finite living-entity dimension from 0.1 to {max}"));
+                }
+            }
+        }
         if self.shadow_radius.is_some() || self.shadow_strength.is_some() {
             return Err(format!(
                 "{name}: only a living type has renderer shadow overrides"
