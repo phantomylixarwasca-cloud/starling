@@ -34,6 +34,30 @@ struct BoxGeometry { origin: [f32; 3], size: [f32; 3], inflation: f32, pivot: Op
 struct Bone { name: String, pivot: [f32; 3], rotation: [f32; 3], children: Vec<usize>, cubes: Vec<BoxGeometry> }
 struct Rig { sprite: String, bones: Vec<Bone>, roots: Vec<usize>, idle: Option<Clip>, walk: Option<Clip>, run: Option<Clip> }
 
+/// GeckoLib does not render every bone present in the .geo.json. The original
+/// Fapcraft model classes turn off unused armor/variants, and its renderer
+/// draws the `steve` player rig in a separate pass with the player's own skin.
+/// Rendering that second rig with a character sprite made giant, incorrectly
+/// textured heads and torsos overlap the actual character.
+fn hidden_in_default_character_pose(name: &str) -> bool {
+    name == "steve"
+        || name == "items"
+        || name == "weapon"
+        || name == "itemRenderer"
+        || name.starts_with("armor")
+}
+
+/// Bedrock face UVs are in *logical* texture pixels (usually 64x64), not
+/// pixels of the 512px/4096px PNG. Native cube UVs use 16 texels per sprite.
+/// Do not discard negative UV dimensions: original faces may flip vertically.
+fn bedrock_uv(u: f32, v: f32, du: f32, dv: f32, width: f32, height: f32) -> Option<[f32; 4]> {
+    if ![u, v, du, dv, width, height].iter().all(|x| x.is_finite()) || width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    Some([u * 16.0 / width, v * 16.0 / height,
+          (u + du) * 16.0 / width, (v + dv) * 16.0 / height])
+}
+
 fn triplet(v: Option<&Value>, default: [f32; 3]) -> [f32; 3] {
     let Some(array) = v.and_then(Value::as_array) else { return default };
     if array.len() < 3 { return default; }
@@ -137,7 +161,7 @@ fn load_rig(zip: &mut zip::ZipArchive<File>, character: &Character) -> Result<Ri
                                 if at.len() == 2 && sz.len() == 2 {
                                     let (u, v) = (num(&at[0]),num(&at[1]));
                                     let (du,dv) = (num(&sz[0]),num(&sz[1]));
-                                    uv[idx] = Some([u*16.0/tex_w,v*16.0/tex_h,(u+du)*16.0/tex_w,(v+dv)*16.0/tex_h]);
+                                    uv[idx] = bedrock_uv(u, v, du, dv, tex_w, tex_h);
                                 }
                             }
                         }
@@ -204,6 +228,9 @@ fn rotate(draw: &mut dyn BlockEntityDrawContext, deg: [f32;3], pivot: [f32;3]) {
 fn visit(rig: &Rig, index: usize, clip: Option<&Clip>, time: f32, draw:&mut dyn BlockEntityDrawContext, depth: usize) {
     if depth > 64 {return;}
     let Some(bone)=rig.bones.get(index) else {return;};
+    // The Java cv/d_ renderers hide entire alternate bone subtrees. In
+    // particular the Steve player-model pass requires a different skin.
+    if hidden_in_default_character_pose(&bone.name) { return; }
     draw.push();
     let channels=clip.and_then(|c|c.bones.get(&bone.name));
     if let Some(c)=channels {
@@ -269,6 +296,18 @@ pub(super) fn install(registry: &mut dyn EntityRenderers) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn original_geckolib_visibility_and_uvs() {
+        for bone in ["steve", "items", "armorChest", "armorHelmet", "armorBoobs", "weapon"] {
+            assert!(hidden_in_default_character_pose(bone), "{bone}");
+        }
+        for bone in ["body", "torso", "hip", "head", "bra", "slip", "hair", "leaf7"] {
+            assert!(!hidden_in_default_character_pose(bone), "{bone}");
+        }
+        assert_eq!(bedrock_uv(19., 57., 5., 7., 64., 64.), Some([4.75,14.25,6.0,16.0]));
+        assert_eq!(bedrock_uv(46., 36., 5., -3., 64., 64.), Some([11.5,9.0,12.75,8.25]));
+        assert_eq!(bedrock_uv(0., 0., 1., 1., 0., 64.), None);
+    }
     #[test]
     fn easing_and_track_interpolation() {
         let keys=parse_track(Some(&serde_json::json!({"0.0":{"vector":[0,0,0]},"1.0":{"vector":[10,0,0]}})));
