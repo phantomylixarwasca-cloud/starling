@@ -4,7 +4,7 @@
 //!
 //! Locomotion uses LivingRenderState. Original Java game logic and its interaction
 //! state machine have *not* been ported; this is the actual renderer bridge.
-use mod_api::{BlockEntityDrawContext, CubeFace, EntityRenderState, EntityRenderer, EntityRenderers};
+use mod_api::{BlockEntityDrawContext, EntityRenderState, EntityRenderer, EntityRenderers};
 use serde_json::Value;
 use std::{collections::HashMap, fs::File, io::Read, path::PathBuf, sync::{Arc, OnceLock}};
 
@@ -30,7 +30,7 @@ enum Easing { Linear, SineIn, SineOut, SineBoth, QuadIn, QuadOut, QuadBoth }
 #[derive(Default)]
 struct Channels { rotation: Vec<Key>, position: Vec<Key>, scale: Vec<Key> }
 struct Clip { duration: f32, bones: HashMap<String, Channels> }
-struct BoxGeometry { origin: [f32; 3], size: [f32; 3], inflation: f32, pivot: Option<[f32; 3]>, rotation: [f32; 3], uv: [Option<[f32; 4]>; 6] }
+struct BoxGeometry { origin: [f32; 3], size: [f32; 3], inflation: f32, pivot: Option<[f32; 3]>, rotation: [f32; 3], uv: [Option<[f32; 4]>; 6], swap_sides: bool, flip_uv: bool }
 struct Bone { name: String, pivot: [f32; 3], rotation: [f32; 3], children: Vec<usize>, cubes: Vec<BoxGeometry> }
 struct Rig { sprite: String, bones: Vec<Bone>, roots: Vec<usize>, idle: Option<Clip>, walk: Option<Clip>, run: Option<Clip> }
 
@@ -167,10 +167,15 @@ fn load_rig(zip: &mut zip::ZipArchive<File>, character: &Character) -> Result<Ri
                         }
                     }
                 }
+                let bone_mirror = bone.get("mirror").and_then(Value::as_bool).unwrap_or(false);
+                let cube_mirror = c.get("mirror").and_then(Value::as_bool).unwrap_or(false);
                 cubes.push(BoxGeometry {
-                    origin,size,inflation:c.get("inflate").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+                    origin,size,inflation:c.get("inflate").or_else(||bone.get("inflate"))
+                        .and_then(Value::as_f64).unwrap_or(0.0) as f32,
                     pivot:c.get("pivot").map(|v| triplet(Some(v),[0.0;3])),
                     rotation:triplet(c.get("rotation"),[0.0;3]),uv,
+                    swap_sides:bone_mirror || cube_mirror,
+                    flip_uv:cube_mirror,
                 });
             }
         }
@@ -217,13 +222,47 @@ fn rigs() -> &'static Vec<Option<Rig>> {
         })
     })
 }
+/// Exact axis conversion used by Fapcraft's bundled GeckoLib GeoBuilder.java:
+/// rotation X and Y are negated and pivot X is negated when JSON is loaded.
+/// Geckolib MatrixStack rotates Z, then Y, then X.
 fn rotate(draw: &mut dyn BlockEntityDrawContext, deg: [f32;3], pivot: [f32;3]) {
-    let pivot=pivot.map(|v|v/16.0);
-    // GeckoLib/Bedrock bones rotate in local X,Y,Z axes; a sign inversion on
-    // the Y axis aligns the engine's body-forward convention.
-    for (axis, angle) in [([0.0,0.0,1.0],deg[2]),([0.0,1.0,0.0],-deg[1]),([1.0,0.0,0.0],deg[0])] {
+    let pivot=[-pivot[0]/16.0,pivot[1]/16.0,pivot[2]/16.0];
+    for (axis, angle) in [([0.0,0.0,1.0],deg[2]),([0.0,1.0,0.0],-deg[1]),([1.0,0.0,0.0],-deg[0])] {
         if angle.abs()>0.0001 {draw.rotate_about(axis,angle,pivot);}
     }
+}
+
+/// Match the six face vertex orders in GeckoLib's bundled GeoCube.java, not
+/// Minecraft's block FaceBakery. The latter rotated some original texture
+/// faces a quarter-turn (and did not apply the Bedrock flipped X axis).
+fn gecko_face(c: &BoxGeometry, direction: usize) -> [[f32;3];4] {
+    let o=c.origin;let sz=c.size;let inflate=c.inflation;
+    // GeoCube.createFromPojoCube: x = -(origin.x + size.x) / 16.
+    let lo=[-(o[0]+sz[0])-inflate,o[1]-inflate,o[2]-inflate].map(|v|v/16.0);
+    let hi=[-o[0]+inflate,o[1]+sz[1]+inflate,o[2]+sz[2]+inflate].map(|v|v/16.0);
+    let p=[
+        [lo[0],lo[1],lo[2]], // P1
+        [lo[0],lo[1],hi[2]], // P2
+        [lo[0],hi[1],lo[2]], // P3
+        [lo[0],hi[1],hi[2]], // P4
+        [hi[0],lo[1],lo[2]], // P5
+        [hi[0],lo[1],hi[2]], // P6
+        [hi[0],hi[1],lo[2]], // P7
+        [hi[0],hi[1],hi[2]], // P8
+    ];
+    // Order: down, up, north, south, west, east.
+    let indices = match (direction, c.swap_sides) {
+        (0,false)|(1,true) => [0,4,5,1],
+        (1,false)|(0,true) => [3,7,6,2],
+        (2,_) => [2,6,4,0],
+        (3,_) => [7,3,1,5],
+        (4,false)|(5,true) => [3,2,0,1],
+        (5,false)|(4,true) => [6,7,5,4],
+        _ => unreachable!(),
+    };
+    // GeoQuad.java supplies top-right, top-left, bottom-left, bottom-right.
+    // native_draw_quad requires top-left, bottom-left, bottom-right, top-right.
+    [p[indices[1]], p[indices[2]], p[indices[3]], p[indices[0]]]
 }
 fn visit(rig: &Rig, index: usize, clip: Option<&Clip>, time: f32, draw:&mut dyn BlockEntityDrawContext, depth: usize) {
     if depth > 64 {return;}
@@ -235,26 +274,31 @@ fn visit(rig: &Rig, index: usize, clip: Option<&Clip>, time: f32, draw:&mut dyn 
     let channels=clip.and_then(|c|c.bones.get(&bone.name));
     if let Some(c)=channels {
         let pos=sample(&c.position,time,[0.0;3]);
-        draw.translate(pos.map(|v|v/16.0));
+        // MatrixStack.translate(GeoBone) negates X, unlike raw Bedrock JSON.
+        draw.translate([-pos[0]/16.0,pos[1]/16.0,pos[2]/16.0]);
     }
     let rot=channels.map_or([0.0;3],|c|sample(&c.rotation,time,[0.0;3]));
     rotate(draw,std::array::from_fn(|i|bone.rotation[i]+rot[i]),bone.pivot);
     if let Some(c)=channels {
         if !c.scale.is_empty() {
             let scale=sample(&c.scale,time,[1.0;3]);
-            draw.translate(bone.pivot.map(|v|v/16.0));draw.scale(scale);
-            draw.translate(bone.pivot.map(|v|-v/16.0));
+            let pivot=[-bone.pivot[0]/16.0,bone.pivot[1]/16.0,bone.pivot[2]/16.0];
+            draw.translate(pivot);draw.scale(scale);
+            draw.translate(pivot.map(|v|-v));
         }
     }
     for c in &bone.cubes {
         if c.uv.iter().all(Option::is_none){continue;}
-        let faces=std::array::from_fn(|idx|c.uv[idx].map(|uv|CubeFace::new(&rig.sprite).with_uv(uv)));
-        let low=std::array::from_fn(|i|c.origin[i]-c.inflation);
-        let high=std::array::from_fn(|i|c.origin[i]+c.size[i]+c.inflation);
+        draw.push();
         if c.rotation.iter().any(|v|v.abs()>0.001) {
-            draw.push();rotate(draw,c.rotation,c.pivot.unwrap_or(bone.pivot));
-            let _=draw.cube(low,high,faces,0xFFFFFF);draw.pop();
-        } else {let _=draw.cube(low,high,faces,0xFFFFFF);}
+            rotate(draw,c.rotation,c.pivot.unwrap_or(bone.pivot));
+        }
+        for (direction, rect) in c.uv.iter().enumerate() {
+            let Some([u0,v0,u1,v1]) = rect else {continue;};
+            let uv = if c.flip_uv {[*u1,*v0,*u0,*v1]} else {[*u0,*v0,*u1,*v1]};
+            let _=draw.quad(&rig.sprite,gecko_face(c,direction),uv,0xFFFFFF);
+        }
+        draw.pop();
     }
     for child in &bone.children {visit(rig,*child,clip,time,draw,depth+1);}
     draw.pop();
@@ -296,6 +340,18 @@ pub(super) fn install(registry: &mut dyn EntityRenderers) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn geckolib_faces_and_x_conversion() {
+        let cube=BoxGeometry {origin:[1.0,2.0,3.0],size:[2.0,3.0,4.0],inflation:0.0,
+            pivot:None,rotation:[0.0;3],uv:[None;6],swap_sides:false,flip_uv:false};
+        // GeckoLib reverses X and translates the origin by the cube width.
+        let north=gecko_face(&cube,2);
+        assert_eq!(north[0],[-1.0/16.0,5.0/16.0,3.0/16.0]);
+        assert_eq!(north[2],[-3.0/16.0,2.0/16.0,3.0/16.0]);
+        let mut mirrored=cube;
+        mirrored.swap_sides=true;
+        assert_ne!(gecko_face(&mirrored,4), gecko_face(&mirrored,5));
+    }
     #[test]
     fn original_geckolib_visibility_and_uvs() {
         for bone in ["steve", "items", "armorChest", "armorHelmet", "armorBoobs", "weapon"] {
