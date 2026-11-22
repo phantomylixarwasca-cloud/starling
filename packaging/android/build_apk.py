@@ -42,7 +42,7 @@ LABEL = "Starling"
 # StarlingPreview) and its own sign-in and game files. Preview is what starling-client/starling's
 # CI builds, signed with that repository's test key: the release key stays out of it.
 DEV_SUFFIX = ".dev"
-VARIANTS = {"dev": (DEV_SUFFIX, " Dev"), "preview": (".espanol", " Español")}
+VARIANTS = {"dev": (DEV_SUFFIX, " Dev"), "preview": (".espanol.ui", " Español UI")}
 VERSION_NAME = "0.9.0"
 VERSION_CODE = 14
 MIN_SDK = 26  # AAudio (cpal)
