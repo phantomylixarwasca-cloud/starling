@@ -38,7 +38,9 @@ enum Easing {
 #[derive(Default)]
 struct Channels { rotation: Vec<Key>, position: Vec<Key>, scale: Vec<Key> }
 struct Clip { duration: f32, bones: HashMap<String, Channels> }
+#[derive(Clone)]
 struct BoxGeometry { origin: [f32; 3], size: [f32; 3], inflation: f32, pivot: Option<[f32; 3]>, rotation: [f32; 3], uv: [Option<[f32; 4]>; 6], swap_sides: bool, flip_uv: bool }
+#[derive(Clone)]
 struct Bone { name: String, pivot: [f32; 3], rotation: [f32; 3], children: Vec<usize>, cubes: Vec<BoxGeometry> }
 struct Rig { sprite: String, bones: Vec<Bone>, roots: Vec<usize>, nude: Option<Box<Rig>>, idle: Option<Clip>, walk: Option<Clip>, run: Option<Clip>, talk: Option<Clip>, headpat: Option<Clip>, actions: HashMap<String, Clip> }
 
@@ -629,8 +631,17 @@ fn load_rig_variant(zip: &mut zip::ZipArchive<File>, character: &Character, geom
 fn load_rig(zip: &mut zip::ZipArchive<File>, character: &Character) -> Result<Rig, String> {
     let mut rig = load_rig_variant(zip, character, character.geo)?;
     if character.id == "bia" {
-        rig.nude = Some(Box::new(load_rig_variant(zip, character,
-            "geo/bia/bianude.geo.json")?));
+        let nude=load_rig_variant(zip,character,"geo/bia/bianude.geo.json")?;
+        // In the original source the pillow belongs to the alternate Bia
+        // geometry. Bring that single original bone into the dressed rig so
+        // anal_prepare/anal_wait can show it without changing her outfit.
+        if let Some(pillow)=nude.bones.iter().find(|b|b.name=="pillow") {
+            let mut pillow=pillow.clone();
+            pillow.children.clear();
+            rig.roots.push(rig.bones.len());
+            rig.bones.push(pillow);
+        }
+        rig.nude=Some(Box::new(nude));
     }
     Ok(rig)
 }
@@ -698,12 +709,12 @@ fn gecko_face(c: &BoxGeometry, direction: usize) -> [[f32;3];4] {
     // native_draw_quad requires top-left, bottom-left, bottom-right, top-right.
     [p[indices[1]], p[indices[2]], p[indices[3]], p[indices[0]]]
 }
-fn visit(rig: &Rig, index: usize, clip: Option<&Clip>, time: f32, draw:&mut dyn BlockEntityDrawContext, depth: usize) {
+fn visit(rig: &Rig, index: usize, clip: Option<&Clip>, time: f32, draw:&mut dyn BlockEntityDrawContext, depth: usize, show_pillow: bool) {
     if depth > 64 {return;}
     let Some(bone)=rig.bones.get(index) else {return;};
     // The Java cv/d_ renderers hide entire alternate bone subtrees. In
     // particular the Steve player-model pass requires a different skin.
-    if hidden_in_default_character_pose(&bone.name) { return; }
+    if hidden_in_default_character_pose(&bone.name) || (bone.name=="pillow" && !show_pillow) { return; }
     draw.push();
     let channels=clip.and_then(|c|c.bones.get(&bone.name));
     if let Some(c)=channels {
@@ -734,7 +745,7 @@ fn visit(rig: &Rig, index: usize, clip: Option<&Clip>, time: f32, draw:&mut dyn 
         }
         draw.pop();
     }
-    for child in &bone.children {visit(rig,*child,clip,time,draw,depth+1);}
+    for child in &bone.children {visit(rig,*child,clip,time,draw,depth+1,show_pillow);}
     draw.pop();
 }
 
@@ -759,7 +770,10 @@ impl EntityRenderer for Renderer {
         let movement_clip=if speed>0.60 {rig.run.as_ref().or(rig.walk.as_ref())}
             else if speed>0.055 {rig.walk.as_ref().or(rig.run.as_ref())}
             else {rig.idle.as_ref()};
-        let social=social_pose(entity.id).and_then(|(action, seconds)|{
+        let social_state=social_pose(entity.id);
+        let show_pillow=matches!(social_state,
+            Some((SocialAction::Clip(name),_)) if name.starts_with("anal_"));
+        let social=social_state.and_then(|(action, seconds)|{
             let clip=match action {
                 SocialAction::Talk=>rig.talk.as_ref(),
                 SocialAction::Headpat=>rig.headpat.as_ref(),
@@ -783,7 +797,7 @@ impl EntityRenderer for Renderer {
             draw.scale([living.scale,living.scale,living.scale]);
             if living.death_time>0.0 {draw.rotate_about([0.0,0.0,1.0],(living.death_time*4.5).min(90.0),[0.0,0.6,0.0]);}
         } else {draw.rotate_about([0.0,1.0,0.0],geckolib_model_yaw(entity.yaw),[0.0;3]);}
-        for root in &rig.roots {visit(rig,*root,clip,time,draw,0);}
+        for root in &rig.roots {visit(rig,*root,clip,time,draw,0,show_pillow);}
         draw.pop();
         Ok(())
     }
