@@ -269,7 +269,7 @@ impl Game<'_> {
         *state().lock().unwrap_or_else(|e|e.into_inner())=(!close).then_some(menu);
         if let Some(clip)=social {
             if let Ok(entity)=u32::try_from(menu.entity){
-                super::fapcraft_native::trigger_social(entity,clip);
+                super::fapcraft_native::trigger_social(entity,menu.kind,clip);
                 // A visible player gesture accompanies the NPC pose. Proper
                 // two-actor motion synchronisation still requires the Forge
                 // interaction state machine, which has not been ported.
