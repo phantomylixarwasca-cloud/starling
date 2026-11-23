@@ -194,20 +194,24 @@ fn button_rect(x:f32,y:f32,w:f32,i:usize)->(f32,f32,f32,f32) {
 
 impl Game<'_> {
 
-    /// The original Forge entity seats the player beside a character before a
-    /// two-actor clip (em.java -> func_70634_a). Align the local player's feet
-    /// one block in front, only where the two body blocks are clear. A collision
-    /// is a refusal, never a forced teleport through scenery.
+    /// Align the player in Bia's frontal hand-reach zone. This also keeps
+    /// her face toward the player when the player initiates the gesture from
+    /// the side. Refuse an action if the actor moved outside interaction reach.
+    /// Collision checks prevent teleporting the player into an obstruction.
     fn fapcraft_align_player_for_contact(&mut self, entity_id:i32) -> bool {
         use horizon_world::level::LevelAccess;
         let Some(target) = self.level_entity(entity_id) else {return false};
         let Some(npc) = self.target_position(target) else {return false};
+        let Some(player) = self.player.as_ref().map(|p|p.position) else {return false};
+        let distance=((player.x-npc[0]).powi(2)+(player.y-npc[1]).powi(2)
+            +(player.z-npc[2]).powi(2)).sqrt();
+        if !distance.is_finite() || distance > 2.25 { return false; }
         let yaw = self.target_rotation(target)[0];
         let rad = f64::from(yaw).to_radians();
         let wanted = [
-            npc[0] - rad.sin()*1.05,
+            npc[0] - rad.sin()*0.72,
             npc[1],
-            npc[2] + rad.cos()*1.05,
+            npc[2] + rad.cos()*0.72,
         ];
         if !wanted.iter().all(|v| v.is_finite()) {return false}
         let (x,y,z)=(wanted[0].floor() as i32,wanted[1].floor() as i32,wanted[2].floor() as i32);
