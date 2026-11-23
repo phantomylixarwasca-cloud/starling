@@ -40,7 +40,7 @@ struct Channels { rotation: Vec<Key>, position: Vec<Key>, scale: Vec<Key> }
 struct Clip { duration: f32, bones: HashMap<String, Channels> }
 struct BoxGeometry { origin: [f32; 3], size: [f32; 3], inflation: f32, pivot: Option<[f32; 3]>, rotation: [f32; 3], uv: [Option<[f32; 4]>; 6], swap_sides: bool, flip_uv: bool }
 struct Bone { name: String, pivot: [f32; 3], rotation: [f32; 3], children: Vec<usize>, cubes: Vec<BoxGeometry> }
-struct Rig { sprite: String, bones: Vec<Bone>, roots: Vec<usize>, nude: Option<Box<Rig>>, idle: Option<Clip>, walk: Option<Clip>, run: Option<Clip>, talk: Option<Clip>, headpat: Option<Clip>, actions: HashMap<&'static str, Clip> }
+struct Rig { sprite: String, bones: Vec<Bone>, roots: Vec<usize>, nude: Option<Box<Rig>>, idle: Option<Clip>, walk: Option<Clip>, run: Option<Clip>, talk: Option<Clip>, headpat: Option<Clip>, actions: HashMap<String, Clip> }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SocialAction { Talk, Headpat, Clip(&'static str) }
@@ -504,7 +504,22 @@ fn load_rig_variant(zip: &mut zip::ZipArchive<File>, character: &Character, geom
         "prone_doggy_cum","wave_idle",
     ] {
         if let Some(found) = clip(&anim, character.alias, suffix) {
-            actions.insert(suffix, found);
+            actions.insert(suffix.to_owned(), found);
+        }
+    }
+    // Do not silently omit original character clips merely because they were
+    // not in the old demo buttons. Bia includes 41 source animations.
+    if character.id == "bia" {
+        if let Some(entries) = anim.get("animations").and_then(Value::as_object) {
+            for key in entries.keys() {
+                if let Some(suffix) = key.strip_prefix("animation.bia.") {
+                    if !actions.contains_key(suffix) {
+                        if let Some(found) = clip(&anim, character.alias, suffix) {
+                            actions.insert(suffix.to_owned(), found);
+                        }
+                    }
+                }
+            }
         }
     }
     Ok(Rig { sprite:format!("sexmod:entity/fapcraft_native/{}", character.id),bones,roots,nude:None,actions,
