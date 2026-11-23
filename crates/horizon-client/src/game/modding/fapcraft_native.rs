@@ -45,7 +45,22 @@ struct Rig { sprite: String, bones: Vec<Bone>, roots: Vec<usize>, nude: Option<B
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SocialAction { Talk, Headpat, Clip(&'static str) }
 #[derive(Clone, Copy)]
-struct SocialState { action: SocialAction, kind: &'static str, started: Instant, duration: f32 }
+struct SocialState {
+    action: SocialAction,
+    kind: &'static str,
+    started: Instant,
+    duration: f32,
+    playlist: Option<&'static [&'static str]>,
+    phase: usize,
+}
+const BIA_DOGGY: &[&str] = &[
+    "prone_doggy_intro", "prone_doggy_insert", "prone_doggy_soft",
+    "prone_doggy_hard1", "prone_doggy_hard2", "prone_doggy_hard3",
+    "prone_doggy_cum",
+];
+const BIA_ANA: &[&str] = &[
+    "anal_prepare", "anal_wait", "anal_start", "anal_slow", "anal_fast", "anal_cum",
+];
 static SOCIAL: OnceLock<Mutex<HashMap<u32, SocialState>>> = OnceLock::new();
 static BIA_UNDRESSED: OnceLock<Mutex<HashMap<u32, bool>>> = OnceLock::new();
 
@@ -125,8 +140,29 @@ pub(crate) fn trigger_social(id: u32, kind: &str, clip: &'static str) {
         },
         started: Instant::now(),
         duration,
+        playlist: None,
+        phase: 0,
     });
 }
+/// Preview of Bia's original clip sequences; input-driven speed and camera
+/// changes from Forge still require a separate native controller.
+pub(crate) fn trigger_bia_sequence(id: u32, choice: &str) -> bool {
+    let sequence = match choice {
+        "doggy" => BIA_DOGGY,
+        "ana" => BIA_ANA,
+        _ => return false,
+    };
+    let Some(&first) = sequence.first() else { return false };
+    trigger_social(id, "bia", first);
+    if let Some(active) = SOCIAL.get() {
+        if let Some(state) = active.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&id) {
+            state.playlist = Some(sequence);
+            return true;
+        }
+    }
+    false
+}
+
 /// The integrated world server pauses a character's wandering AI only while
 /// an actual social clip is playing. Other mobs and the user's saved NoAI
 /// setting are left untouched.
@@ -204,10 +240,21 @@ impl BodyPose for FapcraftPlayerPose {
     }
 }
 fn social_pose(id: u32) -> Option<(SocialAction, f32)> {
-    let actions = SOCIAL.get()?.lock().unwrap_or_else(|p| p.into_inner());
-    let state = actions.get(&id)?;
-    let time = state.started.elapsed().as_secs_f32();
-    (time < state.duration).then_some((state.action, time))
+    let mut actions = SOCIAL.get()?.lock().unwrap_or_else(|p| p.into_inner());
+    let state = actions.get_mut(&id)?;
+    let mut time = state.started.elapsed().as_secs_f32();
+    if time >= state.duration {
+        let next = state.playlist.and_then(|items| items.get(state.phase + 1)).copied();
+        let Some(next) = next else { return None };
+        state.phase += 1;
+        state.action = SocialAction::Clip(next);
+        state.duration = rigs().get(2).and_then(Option::as_ref)
+            .and_then(|rig| rig.actions.get(next))
+            .map_or(2.0, |clip| clip.duration.clamp(0.25, 12.0));
+        state.started = Instant::now();
+        time = 0.0;
+    }
+    Some((state.action, time))
 }
 
 /// GeckoLib does not render every bone present in the .geo.json. The original
@@ -651,6 +698,14 @@ pub(super) fn install(registry: &mut dyn EntityRenderers) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bia_original_sequences_have_mapped_start_and_end() {
+        assert_eq!(BIA_DOGGY.first().copied(), Some("prone_doggy_intro"));
+        assert_eq!(BIA_DOGGY.last().copied(), Some("prone_doggy_cum"));
+        assert_eq!(BIA_ANA.first().copied(), Some("anal_prepare"));
+        assert_eq!(BIA_ANA.last().copied(), Some("anal_cum"));
+        assert!(!trigger_bia_sequence(17, "other"));
+    }
     #[test]
     fn bia_outfit_switches_independently_by_entity() {
         const BIA_TEST_ENTITY: u32 = u32::MAX - 27;
