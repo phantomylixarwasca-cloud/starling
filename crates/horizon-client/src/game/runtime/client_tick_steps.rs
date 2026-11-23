@@ -37,6 +37,9 @@ impl Game<'_> {
                 // The GUI's player position is fresh here, while the
                 // authoritative world tick may only have a LAN Guest.
                 self.fapcraft_bia_check_proximity();
+                // GeckoLib's SoundKeyframeEvents are synchronized to Bia's
+                // native animation clock, not fired at menu-click time.
+                self.fapcraft_bia_play_sound_events();
                 // Cave mood (a shader pack's playerMood) samples on a random
                 // seeded from the clock: under `HORIZON_STILL` it waits for the
                 // world and draws from its tick.
