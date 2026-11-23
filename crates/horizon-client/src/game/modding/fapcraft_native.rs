@@ -55,6 +55,12 @@ pub(crate) fn trigger_social(id: u32, clip: &'static str) {
         started: Instant::now(),
     });
 }
+/// The integrated world server pauses a character's wandering AI only while
+/// an actual social clip is playing. Other mobs and the user's saved NoAI
+/// setting are left untouched.
+pub(crate) fn social_active(id: u32) -> bool {
+    social_pose(id).is_some()
+}
 fn social_pose(id: u32) -> Option<(SocialAction, f32)> {
     let actions = SOCIAL.get()?.lock().unwrap_or_else(|p| p.into_inner());
     let state = actions.get(&id)?;
