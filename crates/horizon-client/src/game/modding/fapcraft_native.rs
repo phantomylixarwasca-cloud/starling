@@ -236,22 +236,44 @@ pub(crate) fn paired_action_active() -> bool {
 pub(crate) struct FapcraftPlayerPose;
 impl BodyPose for FapcraftPlayerPose {
     fn pose(&self, _age:f32, _at_rest:&[[f32;9];6], poses:&mut [[f32;9];6]) -> bool {
-        let Some(active) = SOCIAL.get() else { return false };
-        let guard = active.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(state) = guard.values()
-            .filter(|s| s.started.elapsed().as_secs_f32() < s.duration
-                || (s.playlist.is_some() && s.session_started.elapsed().as_secs()<120))
-            .filter(|s| matches!(s.action, SocialAction::Headpat
-                | SocialAction::Clip("head_pat") | SocialAction::Clip("hug"))
-                || matches!(s.action,SocialAction::Clip(name) if paired_clip(name)))
-            .max_by_key(|s| s.started)
-        else { return false };
-        let time=state.started.elapsed().as_secs_f32();
-        let phase=(time/state.duration.max(0.001)).clamp(0.0,1.0);
+        // Select the active actor by entity id. Copy the state and release
+        // the lock BEFORE asking social_pose() for the rendered clip; that
+        // function may advance phases and locks SOCIAL itself.
+        let (id,state) = {
+            let Some(active)=SOCIAL.get() else {return false};
+            let guard=active.lock().unwrap_or_else(|p|p.into_inner());
+            let Some((&id,state))=guard.iter()
+                .filter(|(_,s)|s.started.elapsed().as_secs_f32()<s.duration
+                    || (s.playlist.is_some()
+                        && s.session_started.elapsed().as_secs()<120))
+                .filter(|(_,s)|matches!(s.action,SocialAction::Headpat
+                    | SocialAction::Clip("head_pat") | SocialAction::Clip("hug"))
+                    || matches!(s.action,SocialAction::Clip(name)
+                        if paired_clip(name)))
+                .max_by_key(|(_,s)|s.started)
+            else {return false};
+            (id,*state)
+        };
+        // This is the exact same clock and transition used by Renderer::submit
+        // for Bia; the old player code used a different phase after Shift or
+        // the clip boundary, so arms/legs drifted out of sync.
+        let (action,time)=social_pose(id)
+            .unwrap_or((state.action,state.started.elapsed().as_secs_f32()));
+        let duration=match action {
+            SocialAction::Clip(name)=>rigs().get(2).and_then(Option::as_ref)
+                .and_then(|rig|rig.actions.get(name))
+                .map_or(state.duration,|clip|clip.duration),
+            _=>state.duration,
+        };
+        let phase=(time/duration.max(0.001)).clamp(0.0,1.0);
         let ease_in=(phase*8.0).min(1.0);
         let ease_out=((1.0-phase)*8.0).min(1.0);
-        let blend=ease_in*ease_out;
-        match state.action {
+        // Looping paired scenes must not fade out at the end of every clip.
+        let blend=if matches!(action,SocialAction::Clip(name)
+                if paired_clip(name)) {
+            (state.session_started.elapsed().as_secs_f32()*6.0).min(1.0)
+        } else {ease_in*ease_out};
+        match action {
             SocialAction::Clip(name) if paired_clip(name) => {
                 // Reuse the player's own skin and limbs, but drive them from
                 // the original GeckoLib player-bone channels in the same
@@ -259,8 +281,9 @@ impl BodyPose for FapcraftPlayerPose {
                 let original = rigs().get(2).and_then(Option::as_ref)
                     .and_then(|rig| rig.actions.get(name));
                 if let Some(clip)=original {
-                    for (bone,part) in [("Torso2",1usize),("RightArm",2),
-                        ("LeftArm",3),("RightLeg",4),("LeftLeg",5)] {
+                    for (bone,part) in [("Head2",0usize),("Torso2",1),
+                        ("RightArm",2),("LeftArm",3),("RightLeg",4),
+                        ("LeftLeg",5)] {
                         if let Some(channels)=clip.bones.get(bone)
                             && !channels.rotation.is_empty() {
                             let degrees=sample(&channels.rotation,time,[0.0;3]);
