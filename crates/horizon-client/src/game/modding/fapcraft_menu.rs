@@ -234,7 +234,7 @@ impl Game<'_> {
                     }
                 }
                 BedPhase::Preparing(started) if started.elapsed().as_secs_f32()
-                    >= if waiting.choice=="ana" {5.52} else {2.5} => {
+                    >= 5.52 => {
                     let clip=if waiting.choice=="ana" {"anal_wait"} else {"sitdownidle"};
                     super::fapcraft_native::trigger_social(id,"bia",clip);
                     if let Some(state)=bed_approaches()
