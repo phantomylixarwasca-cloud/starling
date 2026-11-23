@@ -531,6 +531,64 @@ pub(crate) fn take_bia_sound_events()->Vec<String> {
     emitted
 }
 
+/// The active paired actor's NPC id. The original Java implementation
+/// moves the actual player and camera to its separate `steve` hierarchy.
+pub(crate) fn bia_active_actor() -> Option<u32> {
+    let active=SOCIAL.get()?;
+    let states=active.lock().unwrap_or_else(|e|e.into_inner());
+    states.iter().filter(|(_,state)|state.kind=="bia"
+        && state.playlist.is_some()
+        && state.session_started.elapsed().as_secs()<120)
+        .max_by_key(|(_,state)|state.session_started)
+        .map(|(&id,_)|id)
+}
+
+/// Replicate the exact transform order in `visit` for a Bedrock bone:
+/// animated translation, then Z/Y/X rotations around GeckoLib's pivot.
+fn bia_bone_matrix(
+    parent:glam::Mat4,bone:&Bone,clip:&Clip,time:f32
+) -> glam::Mat4 {
+    use glam::{Mat4,Vec3};
+    let channel=clip.bones.get(&bone.name);
+    let p=channel.map_or([0.0;3],|c|sample(&c.position,time,[0.0;3]));
+    let rot=channel.map_or([0.0;3],|c|sample(&c.rotation,time,[0.0;3]));
+    let deg=std::array::from_fn::<f32,3,_>(|i|(bone.rotation[i]+rot[i]).to_radians());
+    let pivot=Vec3::new(-bone.pivot[0]/16.0,bone.pivot[1]/16.0,
+        bone.pivot[2]/16.0);
+    parent*Mat4::from_translation(Vec3::new(-p[0]/16.0,p[1]/16.0,p[2]/16.0))
+        *Mat4::from_translation(pivot)
+        *Mat4::from_rotation_z(deg[2])
+        *Mat4::from_rotation_y(-deg[1])
+        *Mat4::from_rotation_x(-deg[0])
+        *Mat4::from_translation(-pivot)
+}
+
+/// Eye position of the Steve skeleton, relative to Bia's entity origin.
+/// This is sampled from the *same clip/time* as the visible Steve and Bia
+/// geometry, so the collision and POV do not remain at the old empty tile.
+pub(crate) fn bia_partner_eye_offset(id:u32,body_yaw:f32)->Option<[f64;3]> {
+    use glam::{Mat4,Vec3};
+    let (SocialAction::Clip(key),time)=social_pose(id)? else {return None};
+    if !paired_clip(key) {return None}
+    let rig=rigs().get(2)?.as_ref()?;
+    let clip=rig.actions.get(key)?;
+    let find=|name:&str|rig.bones.iter().find(|bone|bone.name==name);
+    let mut matrix=Mat4::from_rotation_y(
+        geckolib_model_yaw(body_yaw).to_radians()
+    );
+    for name in ["steve","Torso2","Head2"] {
+        matrix=bia_bone_matrix(matrix,find(name)?,clip,time);
+    }
+    let head=find("Head2")?;
+    // Head pivot is [0,24,-16] in original geometry. The player eye is
+    // about 0.11 blocks above the pivot; account for the head animation.
+    let eye=matrix.transform_point3(Vec3::new(
+        -head.pivot[0]/16.0,head.pivot[1]/16.0+0.11,
+        head.pivot[2]/16.0));
+    eye.is_finite().then_some([f64::from(eye.x),f64::from(eye.y),
+        f64::from(eye.z)])
+}
+
 /// The original source animates two sets of arms. Use the GeckoLib
 /// partner arm channels for the actual POV hand meshes as well, so the
 /// first-person camera does not keep playing vanilla idle arm motion.
@@ -1088,6 +1146,15 @@ pub(super) fn install(registry: &mut dyn EntityRenderers) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn partner_transform_keeps_original_geo_pivot() {
+        let clip=Clip{duration:1.0,bones:HashMap::new(),sound_cues:vec![]};
+        let bone=Bone{name:"Head2".into(),pivot:[0.0,24.0,-16.0],
+            rotation:[0.0;3],children:vec![],cubes:vec![]};
+        let position=bia_bone_matrix(glam::Mat4::IDENTITY,&bone,&clip,0.0)
+            .transform_point3(glam::Vec3::new(0.0,1.5,-1.0));
+        assert!((position-glam::Vec3::new(0.0,1.5,-1.0)).length()<1e-5);
+    }
     #[test]
     fn original_bia_molang_expressions_are_not_zeroed() {
         assert!((bedrock_number(&serde_json::json!("22.42-8"),0.0)-14.42).abs()<0.0001);
