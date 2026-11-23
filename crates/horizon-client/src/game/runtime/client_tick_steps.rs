@@ -31,6 +31,9 @@ impl Game<'_> {
                 super::fapcraft_native::set_bia_first_person(
                     self.camera_type.is_first_person()
                 );
+                horizon_client::first_person::set_fapcraft_pov_hands(
+                    super::fapcraft_native::bia_pov_hand_rotations()
+                );
                 super::fapcraft_native::set_bia_jump(
                     self.player.as_ref().is_some_and(|p|p.jumping)
                 );
