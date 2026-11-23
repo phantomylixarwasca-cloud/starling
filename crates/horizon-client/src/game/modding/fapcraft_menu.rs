@@ -105,26 +105,25 @@ impl Game<'_> {
             "goblin"=>Some("goblin"),"galath"=>Some("galath"),
             "manglelie"=>Some("manglelie"),_=>None,
         }) else {return};
-        // This UI is compiled into Starling itself. The bundled sexmod.hmod
-        // contains registries/assets, not a native ClientHost implementation,
-        // so the generic native-mod open API is not always able to own it.
-        // Fall back to Starling's own screen transition on the visible client.
-        let opened = if self.mod_screen_open("sexmod") {
-            true
-        } else if self.screen == Screen::Playing
+        // The built-in Fapcraft interaction is part of this APK, not a
+        // dynamically loaded native screen supplied by the .hmod.
+        // Do not call the generic mod_screen_open host API: it may report a
+        // successful request without selecting this built-in UI on Android.
+        let opened = if self.screen == Screen::Playing
             && self.player.is_some()
             && self.renderer.is_some()
             && !self.screen_over_playing()
         {
+            self.native_mod_screen = Some("sexmod".to_owned());
             self.set_screen(Screen::Mod);
             if self.screen == Screen::Mod {
-                self.native_mod_screen = Some("sexmod".to_owned());
                 true
             } else {
+                self.native_mod_screen = None;
                 false
             }
         } else {
-            false
+            self.screen == Screen::Mod && self.mod_screen() == Some("sexmod")
         };
         if opened {
             *state().lock().unwrap_or_else(|e|e.into_inner()) =
