@@ -25,6 +25,23 @@ impl Game<'_> {
                     self.tick_script_step(event_loop);
                 }
                 horizon_client::spans::time("tick", || self.tick())?;
+                // Bia's integrated-server handoff has no authority to change
+                // the Android window's camera. Apply this once on its real
+                // client, keeping F5 / mobile perspective controls available.
+                if super::fapcraft_native::take_bia_initial_pov() {
+                    self.apply_camera_type(
+                        horizon_client::camera::CameraType::FirstPerson
+                    );
+                }
+                // Read touch crouch / keyboard Shift from LocalPlayer on the
+                // CLIENT every tick. The server-side player field is often
+                // None and previously reset this to false.
+                super::fapcraft_native::set_bia_fast(
+                    self.player.as_ref().is_some_and(|p|p.shift_key_down)
+                );
+                // Keep the local player's physical collision at the
+                // original Steve rig's animated position, not beside Bia.
+                self.fapcraft_bia_attach_player_to_steve();
                 // Match the original Java camera behavior: the player's
                 // actual POV controls decide whether the embedded Steve
                 // rig may be drawn in third-person, never force third-person.
