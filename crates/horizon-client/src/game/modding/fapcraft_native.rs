@@ -63,17 +63,29 @@ const BIA_ANA: &[&str] = &[
 ];
 static SOCIAL: OnceLock<Mutex<HashMap<u32, SocialState>>> = OnceLock::new();
 static BIA_UNDRESSED: OnceLock<Mutex<HashMap<u32, bool>>> = OnceLock::new();
-
-/// Preserve a wardrobe choice per live NPC. This changes the actual geometry
-/// that the GeckoLib renderer draws, not only its display label.
-pub(crate) fn toggle_bia_dress(id: u32) -> bool {
-    let mut state = BIA_UNDRESSED.get_or_init(|| Mutex::new(HashMap::new()))
+static BIA_WARDROBE_PENDING: OnceLock<Mutex<HashMap<u32, (Instant, bool)>>> = OnceLock::new();
+/// Forge e0.java only switches geometry after the "becomeNude" sound keyframe
+/// in animation.bia.strip, at 3.0 seconds; stripDone is at 5.0 seconds.
+pub(crate) fn toggle_bia_dress(id: u32) -> Option<bool> {
+    let mut pending = BIA_WARDROBE_PENDING.get_or_init(|| Mutex::new(HashMap::new()))
         .lock().unwrap_or_else(|e| e.into_inner());
-    let value = !state.get(&id).copied().unwrap_or(false);
-    state.insert(id, value);
-    value
+    if pending.contains_key(&id) { return None; }
+    let dressed = BIA_UNDRESSED.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock().unwrap_or_else(|e| e.into_inner());
+    let value = !dressed.get(&id).copied().unwrap_or(false);
+    pending.insert(id, (Instant::now(), value));
+    Some(value)
 }
 fn bia_undressed(id: u32) -> bool {
+    if let Some(pending) = BIA_WARDROBE_PENDING.get() {
+        let mut pending = pending.lock().unwrap_or_else(|e|e.into_inner());
+        if pending.get(&id).is_some_and(|(started,_)| started.elapsed().as_secs_f32() >= 3.0) {
+            if let Some((_,value))=pending.remove(&id) {
+                BIA_UNDRESSED.get_or_init(|| Mutex::new(HashMap::new()))
+                    .lock().unwrap_or_else(|e|e.into_inner()).insert(id,value);
+            }
+        }
+    }
     BIA_UNDRESSED.get().and_then(|state|
         state.lock().ok().and_then(|m| m.get(&id).copied())).unwrap_or(false)
 }
@@ -725,9 +737,10 @@ mod tests {
     fn bia_outfit_switches_independently_by_entity() {
         const BIA_TEST_ENTITY: u32 = u32::MAX - 27;
         assert!(!bia_undressed(BIA_TEST_ENTITY));
-        assert!(toggle_bia_dress(BIA_TEST_ENTITY));
-        assert!(bia_undressed(BIA_TEST_ENTITY));
-        assert!(!toggle_bia_dress(BIA_TEST_ENTITY));
+        assert_eq!(toggle_bia_dress(BIA_TEST_ENTITY),Some(true));
+        assert!(!bia_undressed(BIA_TEST_ENTITY));
+        // The cue must finish before a second wardrobe request is accepted.
+        assert_eq!(toggle_bia_dress(BIA_TEST_ENTITY),None);
     }
     #[test]
     fn social_clips_selected_without_changing_locomotion_when_absent() {
