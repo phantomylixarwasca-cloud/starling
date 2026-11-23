@@ -59,33 +59,100 @@ fn response(kind:&str, choice:usize) -> &'static str {
         _=>"",
     }
 }
-fn labels(page:Page) -> &'static [(&'static str,bool)] {
-    match page {
-        Page::Actions=>&[
-            ("Hablar...",true),
-            ("Caricias",true),
-            ("Saludar",true),
-            ("Seguir / Esperar (pendiente)",false),
-            ("Equipo / Casa (pendiente)",false),
-            ("Cerrar",true),
+
+#[derive(Clone, Copy)]
+struct CharacterAction {
+    label: &'static str,
+    clip: &'static str,
+    response: &'static str,
+}
+
+/// These entries reference real animation keys shipped in each character's
+/// original GeckoLib JSON. No generic "everyone gets a headpat" fallback.
+fn character_actions(kind: &str) -> &'static [CharacterAction] {
+    match kind {
+        "jenny" => &[
+            CharacterAction{label:"Saludar",clip:"wave",response:"¡Hola!"},
+            CharacterAction{label:"Alegrarse",clip:"fhappy",response:"Jiji~"},
+            CharacterAction{label:"Ofrecer intercambio",clip:"payment",response:"¿Un trato?"},
+            CharacterAction{label:"Bailar",clip:"fortnite",response:"¡Vamos!"},
         ],
-        Page::Dialogue=>&[
+        "ellie" => &[
+            CharacterAction{label:"Abrazar",clip:"hug",response:"Mhm..."},
+            CharacterAction{label:"Sentarse",clip:"sitdown",response:"Un descanso."},
+            CharacterAction{label:"Descansar sentada",clip:"sitdownidle",response:"..."},
+        ],
+        "bia" => &[
+            CharacterAction{label:"Caricias",clip:"headpat",response:"¡Oh, caricias!"},
+            CharacterAction{label:"Saludar",clip:"wave",response:"Heyaaa~"},
+            CharacterAction{label:"Sentarse",clip:"sitdown",response:"Nya~"},
+        ],
+        "slime" => &[
+            CharacterAction{label:"Saltar",clip:"jumpstart",response:"¡Boing!"},
+            CharacterAction{label:"Alegrarse",clip:"fhappy",response:"¡Bien!"},
+            CharacterAction{label:"Sentarse",clip:"sit",response:"..."},
+        ],
+        "bee" => &[
+            CharacterAction{label:"Movimiento defensivo",clip:"attack0",response:"Bzz!"},
+        ],
+        "luna" => &[
+            CharacterAction{label:"Caricias",clip:"head_pat",response:"..."},
+            CharacterAction{label:"Preparar la pesca",clip:"start_fishing",response:"¡A pescar!"},
+            CharacterAction{label:"Sentarse",clip:"sitting_intro",response:"..."},
+        ],
+        "allie" => &[
+            CharacterAction{label:"Invocar",clip:"summon",response:"Aquí estoy."},
+            CharacterAction{label:"Aparecer",clip:"summon_normal",response:"Hola, mortal."},
+            CharacterAction{label:"Mostrar poderes",clip:"rich_normal",response:"¡Observa!"},
+        ],
+        "kobold" => &[
+            CharacterAction{label:"Dormir",clip:"sleep",response:"Zzz..."},
+            CharacterAction{label:"Sentarse",clip:"sit",response:"..."},
+            CharacterAction{label:"Parpadear",clip:"blink",response:"..."},
+        ],
+        "goblin" => &[
+            CharacterAction{label:"Saltar",clip:"jump_1",response:"¡Hey!"},
+            CharacterAction{label:"Levantarse",clip:"stand_up",response:"¡Arriba!"},
+            CharacterAction{label:"Sentarse",clip:"sit",response:"..."},
+        ],
+        "galath" => &[
+            CharacterAction{label:"Entregar moneda",clip:"give_coin",response:"Toma."},
+            CharacterAction{label:"Invocar",clip:"summon",response:"..."},
+            CharacterAction{label:"Impulsarse",clip:"boost",response:"..."},
+        ],
+        "manglelie" => &[
+            CharacterAction{label:"Enfadarse",clip:"angry_face",response:"¡Eh!"},
+            CharacterAction{label:"Caminar",clip:"walk",response:"..."},
+            CharacterAction{label:"Correr",clip:"running",response:"..."},
+        ],
+        _ => &[],
+    }
+}
+fn labels(kind:&str, page:Page) -> Vec<(&'static str,bool)> {
+    match page {
+        Page::Actions => {
+            let mut out=vec![("Hablar...",true)];
+            out.extend(character_actions(kind).iter().map(|a|(a.label,true)));
+            out.push(("Cerrar",true));
+            out
+        },
+        Page::Dialogue=>vec![
             ("¿Cómo estás?",true),
             ("Cuéntame algo",true),
             ("Salúdame",true),
             ("Volver",true),
             ("Cerrar",true),
         ],
-        Page::Response=>&[
+        Page::Response=>vec![
             ("Volver a hablar",true),
             ("Otras acciones",true),
             ("Cerrar",true),
         ],
     }
 }
-fn panel(w:f32,h:f32,page:Page)->(f32,f32,f32,f32) {
+fn panel(w:f32,h:f32,kind:&str,page:Page)->(f32,f32,f32,f32) {
     let width=(w-14.0).min(260.0).max(130.0);
-    let rows=labels(page).len() as f32;
+    let rows=labels(kind,page).len() as f32;
     let height=(68.0 + rows*24.0).min(h-8.0).max(100.0);
     ((w-width)*0.5,(h-height)*0.5,width,height)
 }
@@ -143,7 +210,7 @@ impl Game<'_> {
         let Some(menu)=*state().lock().unwrap_or_else(|e|e.into_inner()) else {return;};
         let atlas=&self.gui.atlas;
         let (w,h)=(batch.width,batch.height);
-        let (x,y,bw,bh)=panel(w,h,menu.page);
+        let (x,y,bw,bh)=panel(w,h,menu.kind,menu.page);
         batch.fill(atlas,0.0,0.0,w,h,rgba(0,0,0,145));
         batch.fill(atlas,x-2.0,y-2.0,bw+4.0,bh+4.0,rgba(185,155,100,255));
         batch.fill(atlas,x,y,bw,bh,rgba(22,27,34,245));
@@ -152,7 +219,7 @@ impl Game<'_> {
         if menu.page==Page::Response {
             batch.text(atlas,menu.response,x+12.0,y+29.0,rgba(255,222,155,255),true);
         }
-        for (i,&(label,enabled)) in labels(menu.page).iter().enumerate() {
+        for (i,&(label,enabled)) in labels(menu.kind,menu.page).iter().enumerate() {
             let (bx,by,ww,hh)=button_rect(x,y,bw,i);
             if by+hh>y+bh {break;}
             let hovered=enabled&&ui::hovered(self.cursor,bx,by,ww,hh);
@@ -163,26 +230,31 @@ impl Game<'_> {
     pub(super) fn fapcraft_interaction_click(&mut self) {
         let Some(mut menu)=*state().lock().unwrap_or_else(|e|e.into_inner()) else {return;};
         let (w,h)=self.gui_size();
-        let (x,y,bw,bh)=panel(w,h,menu.page);
-        let selected=labels(menu.page).iter().enumerate()
+        let (x,y,bw,bh)=panel(w,h,menu.kind,menu.page);
+        let selected=labels(menu.kind,menu.page).iter().enumerate()
             .find(|(i,(_,enabled))|{
                 let (bx,by,ww,hh)=button_rect(x,y,bw,*i);
                 *enabled&&by+hh<=y+bh&&ui::hovered(self.cursor,bx,by,ww,hh)
             }).map(|(i,_)|i);
         let Some(i)=selected else {return;};
         self.audio.play_button_click();
-        let mut social:Option<bool>=None;
+        let mut social:Option<&'static str>=None;
         let mut voice=false;
         let mut close=false;
         match (menu.page,i) {
             (Page::Actions,0)=>{menu.page=Page::Dialogue;},
-            (Page::Actions,1)=>{menu.response=response(menu.kind,2);menu.page=Page::Response;social=Some(true);voice=true;},
-            (Page::Actions,2)=>{menu.response=response(menu.kind,0);menu.page=Page::Response;social=Some(false);voice=true;},
-            (Page::Actions,5)=>close=true,
+            (Page::Actions,index) if index >= 1 && index <= character_actions(menu.kind).len() => {
+                let action=character_actions(menu.kind)[index-1];
+                menu.response=action.response;
+                menu.page=Page::Response;
+                social=Some(action.clip);
+                voice=true;
+            },
+            (Page::Actions,index) if index==character_actions(menu.kind).len()+1=>close=true,
             (Page::Dialogue,0..=2)=>{
                 menu.response=response(menu.kind,i);
                 menu.page=Page::Response;
-                social=Some(false);voice=true;
+                social=Some("talk");voice=true;
             },
             (Page::Dialogue,3)=>menu.page=Page::Actions,
             (Page::Dialogue,4)=>close=true,
@@ -193,9 +265,13 @@ impl Game<'_> {
         }
         // Release lock before calling gameplay or audio APIs.
         *state().lock().unwrap_or_else(|e|e.into_inner())=(!close).then_some(menu);
-        if let Some(headpat)=social {
+        if let Some(clip)=social {
             if let Ok(entity)=u32::try_from(menu.entity){
-                super::fapcraft_native::trigger_social(entity,headpat);
+                super::fapcraft_native::trigger_social(entity,clip);
+                // A visible player gesture accompanies the NPC pose. Proper
+                // two-actor motion synchronisation still requires the Forge
+                // interaction state machine, which has not been ported.
+                self.swing_arm();
             }
         }
         if voice {
@@ -216,11 +292,14 @@ impl Game<'_> {
 mod tests {
     use super::*;
     #[test] fn menu_has_no_fake_functional_buttons() {
-        assert_eq!(labels(Page::Actions).iter().filter(|(_,enabled)|!*enabled).count(),2);
-        assert_eq!(labels(Page::Dialogue).len(),5);
+        assert_eq!(labels("jenny",Page::Actions).len(),6);
+        assert_eq!(labels("bee",Page::Actions).len(),3);
+        assert_eq!(character_actions("bia")[0].clip,"headpat");
+        assert_eq!(character_actions("ellie")[0].clip,"hug");
+        assert_eq!(labels("jenny",Page::Dialogue).len(),5);
         assert_eq!(name("bia"),"Bia");
         assert_eq!(response("bia",0),"Heyaaa~");
-        let (_,_,w,h)=panel(480.0,320.0,Page::Actions);
+        let (_,_,w,h)=panel(480.0,320.0,"jenny",Page::Actions);
         assert!(w<=480.0&&h<=320.0);
     }
 }
