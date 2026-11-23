@@ -188,6 +188,16 @@ pub(crate) fn trigger_bia_sequence(id: u32, choice: &str) -> bool {
 pub(crate) fn social_active(id: u32) -> bool {
     social_pose(id).is_some()
 }
+/// Allow the player to end a paired sequence by interacting with Bia again.
+pub(crate) fn stop_bia_sequence(id: u32) -> bool {
+    SOCIAL.get().and_then(|states| {
+        let mut states=states.lock().unwrap_or_else(|e|e.into_inner());
+        if states.get(&id).is_some_and(|state|state.playlist.is_some()) {
+            states.remove(&id);
+            Some(())
+        } else { None }
+    }).is_some()
+}
 fn paired_clip(name: &str) -> bool {
     name.starts_with("anal_") || name.starts_with("prone_doggy_")
 }
