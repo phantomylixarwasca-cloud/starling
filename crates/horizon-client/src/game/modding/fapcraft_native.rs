@@ -6,7 +6,7 @@
 //! state machine have *not* been ported; this is the actual renderer bridge.
 use mod_api::{BlockEntityDrawContext, EntityRenderState, EntityRenderer, EntityRenderers};
 use serde_json::Value;
-use std::{collections::HashMap, fs::File, io::Read, path::PathBuf, sync::{Arc, OnceLock}};
+use std::{collections::HashMap, fs::File, io::Read, path::PathBuf, sync::{Arc, Mutex, OnceLock}, time::Instant};
 
 struct Character { id: &'static str, geo: &'static str, animation: &'static str, alias: &'static str }
 const CHARACTERS: [Character; 11] = [
@@ -32,7 +32,31 @@ struct Channels { rotation: Vec<Key>, position: Vec<Key>, scale: Vec<Key> }
 struct Clip { duration: f32, bones: HashMap<String, Channels> }
 struct BoxGeometry { origin: [f32; 3], size: [f32; 3], inflation: f32, pivot: Option<[f32; 3]>, rotation: [f32; 3], uv: [Option<[f32; 4]>; 6], swap_sides: bool, flip_uv: bool }
 struct Bone { name: String, pivot: [f32; 3], rotation: [f32; 3], children: Vec<usize>, cubes: Vec<BoxGeometry> }
-struct Rig { sprite: String, bones: Vec<Bone>, roots: Vec<usize>, idle: Option<Clip>, walk: Option<Clip>, run: Option<Clip> }
+struct Rig { sprite: String, bones: Vec<Bone>, roots: Vec<usize>, idle: Option<Clip>, walk: Option<Clip>, run: Option<Clip>, talk: Option<Clip>, headpat: Option<Clip> }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SocialAction { Talk, Headpat }
+#[derive(Clone, Copy)]
+struct SocialState { action: SocialAction, started: Instant }
+static SOCIAL: OnceLock<Mutex<HashMap<u32, SocialState>>> = OnceLock::new();
+
+/// Right-click interaction dispatch (called by item_actions.rs), separated
+/// from entity model rendering. Social poses automatically expire.
+pub(crate) fn trigger_social(id: u32, headpat: bool) {
+    let actions = SOCIAL.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut actions = actions.lock().unwrap_or_else(|p| p.into_inner());
+    actions.retain(|_, state| state.started.elapsed().as_secs_f32() < 4.0);
+    actions.insert(id, SocialState {
+        action: if headpat { SocialAction::Headpat } else { SocialAction::Talk },
+        started: Instant::now(),
+    });
+}
+fn social_pose(id: u32) -> Option<(SocialAction, f32)> {
+    let actions = SOCIAL.get()?.lock().unwrap_or_else(|p| p.into_inner());
+    let state = actions.get(&id)?;
+    let time = state.started.elapsed().as_secs_f32();
+    (time < 3.0).then_some((state.action, time))
+}
 
 /// GeckoLib does not render every bone present in the .geo.json. The original
 /// Fapcraft model classes turn off unused armor/variants, and its renderer
@@ -198,7 +222,13 @@ fn load_rig(zip: &mut zip::ZipArchive<File>, character: &Character) -> Result<Ri
             .or_else(||clip(&anim, character.alias,"running")),
         run:clip(&anim, character.alias,"run")
             .or_else(||clip(&anim, character.alias,"running"))
-            .or_else(||clip(&anim, character.alias,"fastwalk")) })
+            .or_else(||clip(&anim, character.alias,"fastwalk")),
+        talk:clip(&anim, character.alias,"talk_idle")
+            .or_else(||clip(&anim, character.alias,"talk_response"))
+            .or_else(||clip(&anim, character.alias,"wave_idle")),
+        headpat:clip(&anim, character.alias,"headpat")
+            .or_else(||clip(&anim, character.alias,"head_pat")),
+    })
 }
 
 static RIGS: OnceLock<Vec<Option<Rig>>> = OnceLock::new();
@@ -319,10 +349,23 @@ impl EntityRenderer for Renderer {
             return Ok(());
         };
         let speed=entity.living.map_or(0.0,|l|l.walk_animation_speed);
-        let clip=if speed>0.60 {rig.run.as_ref().or(rig.walk.as_ref())}
+        let movement_clip=if speed>0.60 {rig.run.as_ref().or(rig.walk.as_ref())}
             else if speed>0.055 {rig.walk.as_ref().or(rig.run.as_ref())}
             else {rig.idle.as_ref()};
-        let time=clip.map_or(0.0,|c| (entity.age * 0.05 * if speed>0.65 {1.4} else {1.0}).rem_euclid(c.duration));
+        let social=social_pose(entity.id).and_then(|(action, seconds)|{
+            let clip=match action {
+                SocialAction::Talk=>rig.talk.as_ref(),
+                SocialAction::Headpat=>rig.headpat.as_ref(),
+            }?;
+            Some((clip,seconds.rem_euclid(clip.duration)))
+        });
+        let (clip,time)=match social {
+            Some((clip,time))=>(Some(clip),time),
+            None=>{
+                let time=movement_clip.map_or(0.0,|c| (entity.age * 0.05 * if speed>0.65 {1.4} else {1.0}).rem_euclid(c.duration));
+                (movement_clip,time)
+            }
+        };
         draw.push();
         // GeckoLib's MobRenderer pose applies the character's baked
         // 180-degree forward-axis correction. Without it our mesh looked
@@ -349,6 +392,15 @@ pub(super) fn install(registry: &mut dyn EntityRenderers) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn social_clips_selected_without_changing_locomotion_when_absent() {
+        assert_eq!(CHARACTERS.len(),11);
+        assert!(social_pose(u32::MAX).is_none());
+        trigger_social(u32::MAX, false);
+        assert_eq!(social_pose(u32::MAX).map(|x|x.0),Some(SocialAction::Talk));
+        trigger_social(u32::MAX, true);
+        assert_eq!(social_pose(u32::MAX).map(|x|x.0),Some(SocialAction::Headpat));
+    }
     #[test]
     fn fapcraft_north_south_facing_regression() {
         assert_eq!(geckolib_model_yaw(0.0),180.0);

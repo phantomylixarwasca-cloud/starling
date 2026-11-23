@@ -161,6 +161,10 @@ impl Game<'_> {
             {
                 return Ok(self.interaction_consumed(answer));
             }
+            if self.fapcraft_social_on_click(id, &kind) {
+                self.swing_arm();
+                return Ok(true);
+            }
         }
         Ok(self.interact_frame(target)
             || self.interact_armor_stand(target)
@@ -169,6 +173,39 @@ impl Game<'_> {
             || self.interact_cart(target)
             || self.interact_mob(target)?
             || self.item_interact_mob(target))
+    }
+
+    /// Fapcraft's first non-explicit native social interactions. Unlike the
+    /// original Forge radial dialogue, a normal tap talks and sneak+tap pats
+    /// the character's head. Both are real entity interactions, not display
+    /// passengers or replacement villagers.
+    fn fapcraft_social_on_click(&mut self, id: i32, kind: &str) -> bool {
+        let Some(name) = kind.strip_prefix("sexmod:") else { return false; };
+        let title = match name {
+            "jenny" => "Jenny", "ellie" => "Ellie", "bia" => "Bia",
+            "slime" => "Slime", "bee" => "Bee", "luna" => "Luna",
+            "allie" => "Allie", "kobold" => "Kobold", "goblin" => "Goblin",
+            "galath" => "Galath", "manglelie" => "Manglelie",
+            _ => return false,
+        };
+        let headpat = self.player.as_ref().is_some_and(|p| p.shift_key_down);
+        if let Ok(id) = u32::try_from(id) {
+            super::fapcraft_native::trigger_social(id, headpat);
+        }
+        let action = if headpat { "Caricia" } else { "Hablar" };
+        self.send_overlay_message(horizon_client::text::Text::literal(
+            format!("{title} · {action}"),
+        ));
+        let voiced = matches!(name,"jenny"|"ellie"|"bia"|"slime"|"bee"|"luna"|"allie"|"kobold"|"galath");
+        if voiced {
+            let position = self.level_entity(id).and_then(|target| self.target_position(target));
+            let level = self.level(self.dim.id());
+            if let (Some(at), Some(level)) = (position, level) {
+                let event = format!("sexmod:entity.{name}.ambient");
+                let _ = self.native_queue_sound(level,&event,at,mod_api::SoundSource::Neutral,0.65,1.0,None);
+            }
+        }
+        true
     }
 
     /// Asks the mods whether the acting guest may empty `stack` at `pos`
