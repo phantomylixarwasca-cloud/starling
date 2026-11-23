@@ -614,6 +614,12 @@ impl Game<'_> {
             else {return false;};
         self.teleport_to(super::commands::Target::Player,player,
             Some([waiting.yaw,0.0]),false);
+        // Java starts the paired scene in the player's POV. F5/Android
+        // perspective toggle stays available afterwards; this is a one-time
+        // initial view, not a camera lock.
+        self.requested_camera_type.set(
+            Some(horizon_client::camera::CameraType::FirstPerson)
+        );
         let mob=&mut self.mobs[index];
         mob.nav_stop();
         mob.yaw=waiting.yaw;
