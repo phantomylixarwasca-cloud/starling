@@ -505,6 +505,33 @@ pub(crate) fn take_bia_sound_events()->Vec<String> {
     emitted
 }
 
+/// The original source animates two sets of arms. Use the GeckoLib
+/// partner arm channels for the actual POV hand meshes as well, so the
+/// first-person camera does not keep playing vanilla idle arm motion.
+/// Third person still draws the complete Steve hierarchy.
+pub(crate) fn bia_pov_hand_rotations()->Option<[[f32;3];2]> {
+    if !BIA_FIRST_PERSON.load(Ordering::Relaxed) {return None}
+    let id={
+        let actions=SOCIAL.get()?;
+        let states=actions.lock().unwrap_or_else(|e|e.into_inner());
+        *states.iter().find(|(_,state)|state.kind=="bia"
+            && state.playlist.is_some()
+            && state.session_started.elapsed().as_secs()<120)?.0
+    };
+    let (SocialAction::Clip(name),time)=social_pose(id)? else {return None};
+    if !paired_clip(name) {return None}
+    let clip=rigs().get(2).and_then(Option::as_ref)
+        .and_then(|rig|rig.actions.get(name))?;
+    let angles=|bone:&str| {
+        let degrees=clip.bones.get(bone)
+            .map_or([0.0;3],|channels|
+                sample(&channels.rotation,time,[0.0;3]));
+        [degrees[0].to_radians(),degrees[1].to_radians(),
+            degrees[2].to_radians()]
+    };
+    Some([angles("RightArm"),angles("LeftArm")])
+}
+
 /// Model variants must be rendered in separate passes with separate
 /// textures: see original d_.java and cv.java. The original 'steve' subtree
 /// cannot use Bia's brown 64x64 atlas, or its face/arms become mistextured.
