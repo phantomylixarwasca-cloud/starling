@@ -1320,6 +1320,47 @@ impl Game<'_> {
             }
         }
         let mut mobs = self.mobs.lift();
+        // Follow, wait and return-home use Starling's path navigator. Do not
+        // teleport the NPC every tick or override collision/terrain handling.
+        // Only the local world actor drives orders; remote clients get normal
+        // entity position updates through the existing networking layer.
+        let follow_position = self.player.as_ref()
+            .map(|p| [p.position.x, p.position.y, p.position.z]);
+        {
+            let world = self.mob_world_base(&[]);
+            for mob in mobs.iter_mut() {
+                if !mob.kind.id.starts_with("sexmod:")
+                    || crate::game::fapcraft_native::social_active(mob.id)
+                    || mob.no_ai
+                {
+                    continue;
+                }
+                use crate::game::fapcraft_native::{CompanionMode, companion_order, set_companion_mode};
+                let Some(order) = companion_order(mob.id) else { continue };
+                let target = match order.mode {
+                    CompanionMode::Follow => follow_position,
+                    CompanionMode::ReturnHome => Some(order.home),
+                    CompanionMode::Stay => None,
+                };
+                let Some(at) = target else {
+                    if order.mode == CompanionMode::Stay { mob.nav_stop(); }
+                    continue;
+                };
+                let d2 = (mob.position.x - at[0]).powi(2)
+                    + (mob.position.y - at[1]).powi(2)
+                    + (mob.position.z - at[2]).powi(2);
+                let near = if order.mode == CompanionMode::Follow { 3.0 } else { 1.3 };
+                if d2 < near * near {
+                    mob.nav_stop();
+                    if order.mode == CompanionMode::ReturnHome {
+                        set_companion_mode(mob.id, CompanionMode::Stay, order.home);
+                    }
+                } else if world.game_time % 12 == 0 || mob.ai.nav.is_done() {
+                    let speed = if order.mode == CompanionMode::Follow { 1.15 } else { 0.9 };
+                    let _ = mob.nav_move_to(&world, at, speed);
+                }
+            }
+        }
         #[cfg(test)]
         super::entity::taken_pass_tests::after_take(self);
         let mut dead = Vec::new();
