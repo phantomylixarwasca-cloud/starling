@@ -38,7 +38,7 @@ struct Rig { sprite: String, bones: Vec<Bone>, roots: Vec<usize>, idle: Option<C
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SocialAction { Talk, Headpat, Clip(&'static str) }
 #[derive(Clone, Copy)]
-struct SocialState { action: SocialAction, started: Instant, duration: f32 }
+struct SocialState { action: SocialAction, kind: &'static str, started: Instant, duration: f32 }
 static SOCIAL: OnceLock<Mutex<HashMap<u32, SocialState>>> = OnceLock::new();
 
 /// Companion orders mirror the five management options of the original
@@ -81,7 +81,8 @@ pub(crate) fn set_companion_home(id: u32, position: [f64; 3]) {
 pub(crate) fn trigger_social(id: u32, kind: &str, clip: &'static str) {
     // Match the original clip's timing, not an arbitrary three-second effect.
     // Long idle/facial clips have a cap to prevent trapping an NPC forever.
-    let duration = CHARACTERS.iter().position(|character| character.id == kind)
+    let index = CHARACTERS.iter().position(|character| character.id == kind);
+    let duration = index
         .and_then(|index| rigs().get(index))
         .and_then(Option::as_ref)
         .and_then(|rig| match clip {
@@ -94,6 +95,7 @@ pub(crate) fn trigger_social(id: u32, kind: &str, clip: &'static str) {
     let mut actions = actions.lock().unwrap_or_else(|p| p.into_inner());
     actions.retain(|_, state| state.started.elapsed().as_secs_f32() < state.duration);
     actions.insert(id, SocialState {
+        kind: index.map_or("jenny", |index| CHARACTERS[index].id),
         action: match clip {
             "talk" => SocialAction::Talk,
             "headpat" => SocialAction::Headpat,
@@ -154,11 +156,26 @@ impl BodyPose for FapcraftPlayerPose {
                 poses[3][5] = -0.22 * blend;
             }
             _ => {
-                // A gentle, repeated right-arm pat, not just one attack swing.
-                let stroke = (time * std::f32::consts::TAU * 1.7).sin() * 0.13;
-                poses[2][3] = (-1.27 + stroke) * blend;
-                poses[2][5] = -0.13 * blend;
-                poses[3][3] = -0.12 * blend;
+                // The original character asset contains a separate RightArm
+                // animation channel for the player's touch. Apply its real
+                // timed rotations to the actual player-model right arm.
+                let original = CHARACTERS.iter().position(|character| character.id == state.kind)
+                    .and_then(|index| rigs().get(index))
+                    .and_then(Option::as_ref)
+                    .and_then(|rig| rig.headpat.as_ref())
+                    .and_then(|clip| clip.bones.get("RightArm"))
+                    .filter(|channels| !channels.rotation.is_empty());
+                if let Some(channels) = original {
+                    let degrees = sample(&channels.rotation,time,[0.0;3]);
+                    poses[2][3] = degrees[0].to_radians()*blend;
+                    poses[2][4] = -degrees[1].to_radians()*blend;
+                    poses[2][5] = degrees[2].to_radians()*blend;
+                } else {
+                    let stroke = (time * std::f32::consts::TAU * 1.7).sin() * 0.13;
+                    poses[2][3] = (-1.27 + stroke)*blend;
+                    poses[2][5] = -0.13*blend;
+                }
+                poses[3][3] = -0.12*blend;
             }
         }
         true
