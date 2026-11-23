@@ -411,6 +411,16 @@ impl Game<'_> {
         if self.mobile_holds_mouse(button, pressed) {
             return Ok(());
         }
+        // The client's use button must intercept a Fapcraft NPC *here*,
+        // before normal use packets are queued for the simulated server.
+        // A server-side entity callback cannot show a GUI on the Android
+        // window; it previously fell through to villager's rejection sound.
+        if pressed
+            && button == MouseButton::Right
+            && self.fapcraft_try_open_targeted_menu()
+        {
+            return Ok(());
+        }
         if pressed {
             self.pvp_click(button);
         }
