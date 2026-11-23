@@ -37,7 +37,9 @@ enum Easing {
 }
 #[derive(Default)]
 struct Channels { rotation: Vec<Key>, position: Vec<Key>, scale: Vec<Key> }
-struct Clip { duration: f32, bones: HashMap<String, Channels> }
+#[derive(Clone, Debug)]
+struct SoundCue { time:f32, effect:String }
+struct Clip { duration: f32, bones: HashMap<String, Channels>, sound_cues: Vec<SoundCue> }
 #[derive(Clone)]
 struct BoxGeometry { origin: [f32; 3], size: [f32; 3], inflation: f32, pivot: Option<[f32; 3]>, rotation: [f32; 3], uv: [Option<[f32; 4]>; 6], swap_sides: bool, flip_uv: bool }
 #[derive(Clone)]
@@ -55,6 +57,9 @@ struct SocialState {
     playlist: Option<&'static [&'static str]>,
     phase: usize,
     session_started: Instant,
+    sound_clip: Option<&'static str>,
+    sound_time: f32,
+    sound_counter: u32,
 }
 static BIA_FAST: AtomicBool = AtomicBool::new(false);
 // The real game camera remains user-selectable. On the first-person camera,
@@ -187,6 +192,9 @@ pub(crate) fn trigger_social(id: u32, kind: &str, clip: &'static str) {
         playlist: None,
         phase: 0,
         session_started: Instant::now(),
+        sound_clip: None,
+        sound_time: -1.0,
+        sound_counter: 0,
     });
 }
 /// Preview of Bia's original clip sequences; input-driven speed and camera
@@ -425,6 +433,78 @@ fn social_pose(id: u32) -> Option<(SocialAction, f32)> {
     Some((state.action, time))
 }
 
+/// Exact categories used by Bia's decompiled e0.class
+/// SoundKeyframeEvent switch. Keyframes which are transitions rather than
+/// audio ('Done', 'Switch', etc.) intentionally emit no sound.
+fn bia_audio_categories(effect:&str)-> &'static [(&'static str,usize)] {
+    match effect {
+        "sitdownMSG1" | "headpatMSG1" | "talk_hornyMSG3"
+        | "talk_responseMSG2" => &[("girls.bia.breath",4)],
+        "stripMSG1" | "talk_hornyMSG2" | "talk_responseMSG3"
+        | "headpatMSG4" => &[("girls.bia.giggle",3)],
+        "talk_hornyMSG1" => &[("girls.bia.hey",4)],
+        "talk_hornyMSG4" | "talk_responseMSG1"
+        | "headpatMSG3" => &[("girls.bia.huh",3)],
+        "headpatMSG2" | "orgasm1" | "orgasm2" =>
+            &[("girls.bia.mmm",8)],
+        "anal_prepareMSG1" => &[("misc.plob",1)],
+        "anal_prepareMSG2" => &[("misc.bedrustle",2)],
+        "anal_startMSG1" => &[("girls.bia.mmm",8),("misc.pounding",36)],
+        "anal_startMSG2" | "anal_slowMSG1" =>
+            &[("misc.pounding",36),("girls.bia.ahh",8)],
+        "anal_cumMSG2" => &[("girls.bia.ahh",8)],
+        "slide" => &[("misc.slide",7)],
+        "pound" => &[("misc.pounding",36)],
+        "doggyMoan" => &[("girls.bia.ahh",8),("girls.bia.mmm",8)],
+        "cum" => &[("misc.inserts",5)],
+        _=>&[],
+    }
+}
+
+/// Queue time-aligned GeckoLib sound events once per *client* tick.
+/// The same social_pose clock advances Bia, her partner's skeleton and the
+/// audio cursor. Repeating clips wrap without double-playing a keyframe.
+/// Returns registered sound IDs for Game's own audio engine to play.
+pub(crate) fn take_bia_sound_events()->Vec<String> {
+    let Some(actions)=SOCIAL.get() else {return Vec::new()};
+    let ids:Vec<u32>={
+        let guard=actions.lock().unwrap_or_else(|e|e.into_inner());
+        guard.iter().filter(|(_,state)|state.kind=="bia")
+            .map(|(&id,_)|id).collect()
+    };
+    let mut emitted=Vec::new();
+    for id in ids {
+        let Some((SocialAction::Clip(name),time))=social_pose(id) else {continue};
+        let Some(clip)=rigs().get(2).and_then(Option::as_ref)
+            .and_then(|rig|rig.actions.get(name)) else {continue};
+        let mut guard=actions.lock().unwrap_or_else(|e|e.into_inner());
+        let Some(state)=guard.get_mut(&id) else {continue};
+        if state.sound_clip!=Some(name) {
+            state.sound_clip=Some(name);
+            state.sound_time=-1.0;
+        }
+        let previous=state.sound_time;
+        state.sound_time=time;
+        for cue in &clip.sound_cues {
+            let crossed=if time>=previous {
+                previous<cue.time && cue.time<=time
+            } else {
+                cue.time>previous || cue.time<=time
+            };
+            if !crossed {continue}
+            for &(base,variants) in bia_audio_categories(&cue.effect) {
+                let index=(id as usize + state.sound_counter as usize) % variants;
+                state.sound_counter=state.sound_counter.wrapping_add(1);
+                // Names exactly match the original JAR's sounds.json and
+                // the audio copied into Fapcraft 0.5.2.
+                let kind=base.rsplit('.').next().unwrap_or(base);
+                emitted.push(format!("sexmod:{base}.{kind}{index}"));
+            }
+        }
+    }
+    emitted
+}
+
 /// Model variants must be rendered in separate passes with separate
 /// textures: see original d_.java and cv.java. The original 'steve' subtree
 /// cannot use Bia's brown 64x64 atlas, or its face/arms become mistextured.
@@ -506,7 +586,20 @@ fn clip(source: &Value, alias: &str, suffix: &str) -> Option<Clip> {
             scale: parse_track(data.get("scale")),
         });
     }
-    Some(Clip { duration: duration.max(0.001), bones })
+    // Forge registers GeckoLib's SoundKeyframeEvent; the old port ignored
+    // the entire sound_effects track, so voices were silent even when their
+    // original .ogg files were installed.
+    let mut sound_cues=Vec::new();
+    if let Some(effects)=v.get("sound_effects").and_then(Value::as_object) {
+        for (at,event) in effects {
+            if let (Ok(time),Some(effect))=(at.parse::<f32>(),
+                event.get("effect").and_then(Value::as_str)) {
+                sound_cues.push(SoundCue{time,effect:effect.to_owned()});
+            }
+        }
+        sound_cues.sort_by(|a,b|a.time.total_cmp(&b.time));
+    }
+    Some(Clip { duration: duration.max(0.001), bones, sound_cues })
 }
 /// GeckoLib EasingType definitions as used by the original Bedrock
 /// animations. In particular, the headpat and hug clips need Back, Quart
@@ -913,6 +1006,19 @@ pub(super) fn install(registry: &mut dyn EntityRenderers) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bia_voices_follow_original_keyframe_categories() {
+        assert_eq!(bia_audio_categories("sitdownMSG1"),&[("girls.bia.breath",4)]);
+        assert_eq!(bia_audio_categories("doggyMoan").len(),2);
+        assert!(bia_audio_categories("doggyReset").is_empty());
+        let parsed=clip(&serde_json::json!({"animations":{"animation.bia.test":{
+            "animation_length":2.0,"bones":{},"sound_effects":{
+                "0.25":{"effect":"sitdownMSG1"},"1.2":{"effect":"pound"}
+            }
+        }}}),"bia","test").unwrap();
+        assert_eq!(parsed.sound_cues.len(),2);
+        assert_eq!(parsed.sound_cues[0].effect,"sitdownMSG1");
+    }
     #[test]
     fn bia_camera_and_jump_input_are_explicit() {
         set_bia_first_person(true);
