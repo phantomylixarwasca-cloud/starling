@@ -264,6 +264,35 @@ fn button_rect(x:f32,y:f32,w:f32,i:usize)->(f32,f32,f32,f32) {
 }
 
 impl Game<'_> {
+    /// Anchor the real local player's collision box to the original Steve
+    /// head hierarchy while a paired scene runs. The previous prototype
+    /// only animated a second Steve model while leaving the player at a
+    /// safe *nearby* block, which created a second collision outline and
+    /// a camera from the wrong location. One authoritative local position
+    /// is now used by both collision and the first-person camera.
+    pub(in crate::game) fn fapcraft_bia_attach_player_to_steve(&mut self) {
+        use horizon_core::geometry::Vec3;
+        let Some(id)=super::fapcraft_native::bia_active_actor() else {return};
+        let Some(mob)=self.mobs.iter().find(|m|m.id==id && !m.removed)
+            else {return};
+        let Some(local)=super::fapcraft_native::bia_partner_eye_offset(id,mob.body_yaw)
+            else {return};
+        let Some(player)=self.player.as_mut() else {return};
+        let eye_height=f64::from(player.dimensions.eye_height);
+        let pos=Vec3::new(mob.position.x+local[0],
+            mob.position.y+local[1]-eye_height,
+            mob.position.z+local[2]);
+        if !pos.x.is_finite() || !pos.y.is_finite() || !pos.z.is_finite() {
+            return;
+        }
+        // Paired actions own the actor movement for their duration. Avoid
+        // accumulating collision/gravity velocity that would desynchronize
+        // the camera from the sampled head at the next simulation tick.
+        player.position=pos;
+        player.velocity=Vec3::ZERO;
+        self.previous_position=pos;
+    }
+
     /// Play only real, registered audio cues from GeckoLib's timeline.
     /// The 0.5.2 resource pack contains the original Bia and related effect
     /// sound events. Game's client audio queue owns their lifetimes.
