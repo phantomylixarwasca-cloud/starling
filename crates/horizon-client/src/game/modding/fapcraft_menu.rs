@@ -312,9 +312,8 @@ impl Game<'_> {
     pub(super) fn fapcraft_bia_tick(&mut self) {
         use horizon_world::level::LevelAccess;
         use horizon_core::geometry::Vec3;
-        super::fapcraft_native::set_bia_fast(
-            self.player.as_ref().is_some_and(|p| p.shift_key_down)
-        );
+        // Shift comes from the real Android LocalPlayer in the client tick,
+        // not self.player of the integrated server (which can be absent).
         let waits:Vec<(u32,BedApproach)>=bed_approaches().lock()
             .unwrap_or_else(|e|e.into_inner()).iter()
             .map(|(&id,&state)|(id,state)).collect();
