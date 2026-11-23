@@ -57,6 +57,12 @@ struct SocialState {
     session_started: Instant,
 }
 static BIA_FAST: AtomicBool = AtomicBool::new(false);
+// The real game camera remains user-selectable. On the first-person camera,
+// render its hands, not the third-person Steve sub-rig inside Bia.
+static BIA_FIRST_PERSON: AtomicBool = AtomicBool::new(true);
+pub(crate) fn set_bia_first_person(value: bool) {
+    BIA_FIRST_PERSON.store(value, Ordering::Relaxed);
+}
 pub(crate) fn set_bia_fast(value: bool) {
     BIA_FAST.store(value, Ordering::Relaxed);
 }
@@ -346,11 +352,9 @@ fn social_pose(id: u32) -> Option<(SocialAction, f32)> {
     Some((state.action, time))
 }
 
-/// GeckoLib does not render every bone present in the .geo.json. The original
-/// Fapcraft model classes turn off unused armor/variants, and its renderer
-/// draws the `steve` player rig in a separate pass with the player's own skin.
-/// Rendering that second rig with a character sprite made giant, incorrectly
-/// textured heads and torsos overlap the actual character.
+/// Model variants must be rendered in separate passes with separate
+/// textures: see original d_.java and cv.java. The original 'steve' subtree
+/// cannot use Bia's brown 64x64 atlas, or its face/arms become mistextured.
 fn hidden_in_default_character_pose(name: &str) -> bool {
     name == "steve"
         || name == "items"
@@ -709,12 +713,18 @@ fn gecko_face(c: &BoxGeometry, direction: usize) -> [[f32;3];4] {
     // native_draw_quad requires top-left, bottom-left, bottom-right, top-right.
     [p[indices[1]], p[indices[2]], p[indices[3]], p[indices[0]]]
 }
-fn visit(rig: &Rig, index: usize, clip: Option<&Clip>, time: f32, draw:&mut dyn BlockEntityDrawContext, depth: usize, show_pillow: bool) {
+fn visit(rig: &Rig, index: usize, clip: Option<&Clip>, time: f32, draw:&mut dyn BlockEntityDrawContext, depth: usize, show_pillow: bool, player_pass: bool, sprite: &str) {
     if depth > 64 {return;}
     let Some(bone)=rig.bones.get(index) else {return;};
     // The Java cv/d_ renderers hide entire alternate bone subtrees. In
     // particular the Steve player-model pass requires a different skin.
-    if hidden_in_default_character_pose(&bone.name) || (bone.name=="pillow" && !show_pillow) { return; }
+    if player_pass {
+        // Java cv.java chooses Steve or Alex arm geometry, never both.
+        if bone.name.ends_with("Alex") || bone.name=="items" {return}
+    } else if hidden_in_default_character_pose(&bone.name)
+        || (bone.name=="pillow" && !show_pillow) {
+        return;
+    }
     draw.push();
     let channels=clip.and_then(|c|c.bones.get(&bone.name));
     if let Some(c)=channels {
@@ -741,11 +751,11 @@ fn visit(rig: &Rig, index: usize, clip: Option<&Clip>, time: f32, draw:&mut dyn 
         for (direction, rect) in c.uv.iter().enumerate() {
             let Some([u0,v0,u1,v1]) = rect else {continue;};
             let uv = if c.flip_uv {[*u1,*v0,*u0,*v1]} else {[*u0,*v0,*u1,*v1]};
-            let _=draw.quad(&rig.sprite,gecko_face(c,direction),uv,0xFFFFFF);
+            let _=draw.quad(sprite,gecko_face(c,direction),uv,0xFFFFFF);
         }
         draw.pop();
     }
-    for child in &bone.children {visit(rig,*child,clip,time,draw,depth+1,show_pillow);}
+    for child in &bone.children {visit(rig,*child,clip,time,draw,depth+1,show_pillow,player_pass,sprite);}
     draw.pop();
 }
 
@@ -797,7 +807,23 @@ impl EntityRenderer for Renderer {
             draw.scale([living.scale,living.scale,living.scale]);
             if living.death_time>0.0 {draw.rotate_about([0.0,0.0,1.0],(living.death_time*4.5).min(90.0),[0.0,0.6,0.0]);}
         } else {draw.rotate_about([0.0,1.0,0.0],geckolib_model_yaw(entity.yaw),[0.0;3]);}
-        for root in &rig.roots {visit(rig,*root,clip,time,draw,0,show_pillow);}
+        for root in &rig.roots {
+            visit(rig,*root,clip,time,draw,0,show_pillow,false,&rig.sprite);
+        }
+        // The vanilla Forge renderer d_.java performs a second, player-skin
+        // textured traversal of its geobone 'steve'. The joint animation
+        // channels are the SAME Clip and time as Bia; previous Rust releases
+        // silently discarded this subtree and only posed loose player arms.
+        // Hide this embedded mesh in POV so the normal first-person controls
+        // and animated arms remain unobstructed. F5 may freely change view.
+        if self.0==2 && social_state.is_some_and(|(action,_)|
+            matches!(action,SocialAction::Clip(name) if paired_clip(name)))
+            && !BIA_FIRST_PERSON.load(Ordering::Relaxed) {
+            if let Some(steve)=rig.bones.iter().position(|bone|bone.name=="steve") {
+                visit(rig,steve,clip,time,draw,0,false,true,
+                    "minecraft:entity/player/wide/steve");
+            }
+        }
         draw.pop();
         Ok(())
     }
