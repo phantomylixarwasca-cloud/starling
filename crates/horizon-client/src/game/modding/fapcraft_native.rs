@@ -65,6 +65,12 @@ static BIA_FAST: AtomicBool = AtomicBool::new(false);
 // The real game camera remains user-selectable. On the first-person camera,
 // render its hands, not the third-person Steve sub-rig inside Bia.
 static BIA_FIRST_PERSON: AtomicBool = AtomicBool::new(true);
+/// Pending one-shot camera change; cleared by the Android client tick, not
+/// by the integrated server's render-independent state machine.
+static BIA_INITIAL_POV: AtomicBool = AtomicBool::new(false);
+pub(crate) fn take_bia_initial_pov()->bool {
+    BIA_INITIAL_POV.swap(false,Ordering::Relaxed)
+}
 static BIA_JUMP_HELD: AtomicBool = AtomicBool::new(false);
 static BIA_FINISH_REQUEST: AtomicBool = AtomicBool::new(false);
 pub(crate) fn set_bia_first_person(value: bool) {
@@ -210,6 +216,10 @@ pub(crate) fn trigger_bia_sequence(id: u32, choice: &str) -> bool {
     if let Some(active) = SOCIAL.get() {
         if let Some(state) = active.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&id) {
             state.playlist = Some(sequence);
+            // In Java the black-screen handoff begins in POV. Request the
+            // camera change in the *client* world rather than the integrated
+            // server where it had no effect.
+            BIA_INITIAL_POV.store(true,Ordering::Relaxed);
             return true;
         }
     }
