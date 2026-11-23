@@ -5404,6 +5404,9 @@ impl Game<'_> {
                     &mut batch,
                     horizon_client::screen_draw::RenderPhase::Foreground,
                 );
+                if self.mod_screen() == Some("sexmod") {
+                    self.fapcraft_draw_interaction(&mut batch);
+                }
             }
             Screen::WorldOptions => self.draw_world_options(&mut batch),
             Screen::Friends => self.draw_friends_screen(&mut batch),
@@ -10117,6 +10120,13 @@ impl Game<'_> {
                         }
                         Screen::Stats if button == MouseButton::Left => self.stats_release(),
                         Screen::GameModeSwitcher if !pressed => self.switcher_release(button),
+                        Screen::Mod
+                            if pressed
+                                && button == MouseButton::Left
+                                && self.mod_screen() == Some("sexmod") =>
+                        {
+                            self.fapcraft_interaction_click();
+                        }
                         _ => {}
                     }
                 }

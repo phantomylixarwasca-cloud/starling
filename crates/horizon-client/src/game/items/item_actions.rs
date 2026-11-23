@@ -175,36 +175,23 @@ impl Game<'_> {
             || self.item_interact_mob(target))
     }
 
-    /// Fapcraft's first non-explicit native social interactions. Unlike the
-    /// original Forge radial dialogue, a normal tap talks and sneak+tap pats
-    /// the character's head. Both are real entity interactions, not display
-    /// passengers or replacement villagers.
+    /// Fapcraft's original m.java presents an action GUI after right-click.
+    /// Open the native Android-compatible menu instead of immediately playing
+    /// a fixed animation. Only supported actions are enabled.
     fn fapcraft_social_on_click(&mut self, id: i32, kind: &str) -> bool {
         let Some(name) = kind.strip_prefix("sexmod:") else { return false; };
-        let title = match name {
-            "jenny" => "Jenny", "ellie" => "Ellie", "bia" => "Bia",
-            "slime" => "Slime", "bee" => "Bee", "luna" => "Luna",
-            "allie" => "Allie", "kobold" => "Kobold", "goblin" => "Goblin",
-            "galath" => "Galath", "manglelie" => "Manglelie",
-            _ => return false,
-        };
-        let headpat = self.player.as_ref().is_some_and(|p| p.shift_key_down);
-        if let Ok(id) = u32::try_from(id) {
-            super::fapcraft_native::trigger_social(id, headpat);
+        if !matches!(name,
+            "jenny" | "ellie" | "slime" | "bia" | "bee" | "luna" |
+            "allie" | "kobold" | "goblin" | "galath" | "manglelie"
+        ) {
+            return false;
         }
-        let action = if headpat { "Caricia" } else { "Hablar" };
-        self.send_overlay_message(horizon_client::text::Text::literal(
-            format!("{title} · {action}"),
-        ));
-        let voiced = matches!(name,"jenny"|"ellie"|"bia"|"slime"|"bee"|"luna"|"allie"|"kobold"|"galath");
-        if voiced {
-            let position = self.level_entity(id).and_then(|target| self.target_position(target));
-            let level = self.level(self.dim.id());
-            if let (Some(at), Some(level)) = (position, level) {
-                let event = format!("sexmod:entity.{name}.ambient");
-                let _ = self.native_queue_sound(level,&event,at,mod_api::SoundSource::Neutral,0.65,1.0,None);
-            }
+        // A UI belongs to the local Android client, never the integrated
+        // server or another player's simulation.
+        if !self.options.execution_role.is_client() || self.lan_acting.is_some() {
+            return true;
         }
+        self.fapcraft_open_interaction(id, name);
         true
     }
 
