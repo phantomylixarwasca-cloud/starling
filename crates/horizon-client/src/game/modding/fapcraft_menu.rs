@@ -82,11 +82,8 @@ fn character_actions(kind: &str) -> &'static [CharacterAction] {
             CharacterAction{label:"Sentarse",clip:"sitdown",response:"Un descanso."},
             CharacterAction{label:"Descansar sentada",clip:"sitdownidle",response:"..."},
         ],
-        "bia" => &[
-            CharacterAction{label:"Caricias",clip:"headpat",response:"¡Oh, caricias!"},
-            CharacterAction{label:"Saludar",clip:"wave",response:"Heyaaa~"},
-            CharacterAction{label:"Sentarse",clip:"sitdown",response:"Nya~"},
-        ],
+        // Bia's three actual Forge actions are handled by her dedicated menu.
+        "bia" => &[],
         "slime" => &[
             CharacterAction{label:"Saltar",clip:"jumpstart",response:"¡Boing!"},
             CharacterAction{label:"Alegrarse",clip:"fhappy",response:"¡Bien!"},
@@ -129,6 +126,18 @@ fn character_actions(kind: &str) -> &'static [CharacterAction] {
     }
 }
 fn labels(kind:&str, entity:i32, page:Page) -> Vec<(&'static str,bool)> {
+    if kind == "bia" {
+        return match page {
+            Page::Actions => vec![
+                ("Acariciar",true), ("Hablar",true), ("Desnudar / Vestir",true),
+            ],
+            Page::Dialogue => vec![
+                ("Doggy",true), ("Ana",true), ("Volver",true), ("Cerrar",true),
+            ],
+            Page::Response => vec![("Volver",true),("Cerrar",true)],
+            Page::Companion => vec![],
+        };
+    }
     match page {
         Page::Actions => {
             let mut out=vec![("Hablar...",true)];
@@ -166,6 +175,14 @@ fn labels(kind:&str, entity:i32, page:Page) -> Vec<(&'static str,bool)> {
     }
 }
 fn panel(w:f32,h:f32,kind:&str,entity:i32,page:Page)->(f32,f32,f32,f32) {
+    if kind == "bia" {
+        // Keep the NPC visible left of the screen like the original selector.
+        // Still fit a narrow landscape phone without horizontal scrolling.
+        let width = (w * 0.39).clamp(145.0, 270.0).min(w-10.0);
+        let height = (69.0 + labels(kind,entity,page).len() as f32 * 24.0)
+            .min(h-8.0);
+        return ((w-width-10.0).max(2.0), ((h-height)*0.5).max(4.0), width, height);
+    }
     let width=(w-14.0).min(260.0).max(130.0);
     let rows=labels(kind,entity,page).len() as f32;
     let height=(68.0 + rows*24.0).min(h-8.0).max(100.0);
@@ -255,12 +272,19 @@ impl Game<'_> {
         let atlas=&self.gui.atlas;
         let (w,h)=(batch.width,batch.height);
         let (x,y,bw,bh)=panel(w,h,menu.kind,menu.entity,menu.page);
-        batch.fill(atlas,0.0,0.0,w,h,rgba(0,0,0,145));
-        batch.fill(atlas,x-2.0,y-2.0,bw+4.0,bh+4.0,rgba(185,155,100,255));
-        batch.fill(atlas,x,y,bw,bh,rgba(22,27,34,245));
+        if menu.kind == "bia" {
+            batch.fill(atlas,0.0,0.0,w,h,rgba(0,0,0,62));
+            batch.fill(atlas,x-2.0,y-2.0,bw+4.0,bh+4.0,rgba(115,115,115,220));
+            batch.fill(atlas,x,y,bw,bh,rgba(40,40,40,200));
+            batch.text(atlas,"Bia",w*0.24,h*0.19,u32::MAX,true);
+        } else {
+            batch.fill(atlas,0.0,0.0,w,h,rgba(0,0,0,145));
+            batch.fill(atlas,x-2.0,y-2.0,bw+4.0,bh+4.0,rgba(185,155,100,255));
+            batch.fill(atlas,x,y,bw,bh,rgba(22,27,34,245));
+        }
         let title=format!("Fapcraft · {}",name(menu.kind));
         batch.text(atlas,&title,x+12.0,y+12.0,u32::MAX,true);
-        if menu.page==Page::Response {
+        if menu.page==Page::Response || (menu.kind=="bia" && menu.page==Page::Dialogue) {
             batch.text(atlas,menu.response,x+12.0,y+29.0,rgba(255,222,155,255),true);
         }
         for (i,&(label,enabled)) in labels(menu.kind,menu.entity,menu.page).iter().enumerate() {
@@ -283,9 +307,46 @@ impl Game<'_> {
         let Some(i)=selected else {return;};
         self.audio.play_button_click();
         let mut social:Option<&'static str>=None;
+        let mut scene:Option<&'static str>=None;
         let mut voice=false;
         let mut close=false;
         match (menu.page,i) {
+            (Page::Actions,0) if menu.kind=="bia" => {
+                if !self.fapcraft_align_player_for_contact(menu.entity) {
+                    self.send_overlay_message(Text::literal(
+                        "Acércate a Bia y busca un espacio libre frente a ella",
+                    ));
+                    return;
+                }
+                social=Some("headpat");
+                menu.response="¡Gracias por las caricias!";
+                voice=true;
+                close=true;
+            },
+            (Page::Actions,1) if menu.kind=="bia" => {
+                menu.page=Page::Dialogue;
+                menu.response="¿Te gustaría divertirnos un rato?";
+                social=Some("talk_horny");
+                voice=true;
+            },
+            (Page::Actions,2) if menu.kind=="bia" => {
+                if let Ok(id)=u32::try_from(menu.entity) {
+                    let undressed=super::fapcraft_native::toggle_bia_dress(id);
+                    menu.response=if undressed {"Bia cambió de atuendo"} else {"Bia volvió a vestirse"};
+                    social=Some("strip");
+                    voice=true;
+                    close=true;
+                }
+            },
+            (Page::Dialogue,0..=1) if menu.kind=="bia" => {
+                // The original e0.java follows TALK_HORNY with two choices.
+                // Their GeckoLib clips live in the installed Fapcraft hmod.
+                scene=Some(if i==0 {"doggy"} else {"ana"});
+                menu.response="Interacción iniciada";
+                close=true;
+            },
+            (Page::Dialogue,2) if menu.kind=="bia"=>menu.page=Page::Actions,
+            (Page::Dialogue,3) if menu.kind=="bia"=>close=true,
             (Page::Actions,0)=>{menu.page=Page::Dialogue;},
             (Page::Actions,index) if index >= 1 && index <= character_actions(menu.kind).len() => {
                 let action=character_actions(menu.kind)[index-1];
@@ -375,10 +436,14 @@ impl Game<'_> {
         if let Some(clip)=social {
             if let Ok(entity)=u32::try_from(menu.entity){
                 super::fapcraft_native::trigger_social(entity,menu.kind,clip);
-                // A visible player gesture accompanies the NPC pose. Proper
-                // two-actor motion synchronisation still requires the Forge
-                // interaction state machine, which has not been ported.
-                self.swing_arm();
+                if clip=="headpat" || clip=="head_pat" || clip=="hug" {
+                    self.swing_arm();
+                }
+            }
+        }
+        if let Some(choice)=scene {
+            if let Ok(entity)=u32::try_from(menu.entity) {
+                super::fapcraft_native::trigger_bia_sequence(entity,choice);
             }
         }
         if voice {
@@ -392,7 +457,7 @@ impl Game<'_> {
             }
         }
         if close {
-            if social.is_some() {
+            if social.is_some() || scene.is_some() {
                 self.send_overlay_message(Text::literal(menu.response));
             }
             self.close_mod_screen();
@@ -406,7 +471,10 @@ mod tests {
     #[test] fn menu_has_no_fake_functional_buttons() {
         assert_eq!(labels("jenny",0,Page::Actions).len(),7);
         assert_eq!(labels("bee",0,Page::Actions).len(),4);
-        assert_eq!(character_actions("bia")[0].clip,"headpat");
+        assert!(character_actions("bia").is_empty());
+        assert_eq!(labels("bia",0,Page::Actions).len(),3);
+        assert_eq!(labels("bia",0,Page::Dialogue)[0].0,"Doggy");
+        assert_eq!(labels("bia",0,Page::Dialogue)[1].0,"Ana");
         assert_eq!(character_actions("ellie")[0].clip,"hug");
         assert_eq!(labels("jenny",0,Page::Dialogue).len(),5);
         assert!(!labels("jenny",0,Page::Companion)[3].1);
