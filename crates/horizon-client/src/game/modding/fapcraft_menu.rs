@@ -342,7 +342,7 @@ impl Game<'_> {
                         }
                     }
                 }
-                BedPhase::Fading(start) if start.elapsed().as_secs_f32()>=0.34 => {
+                BedPhase::Fading(start) if start.elapsed().as_secs_f32()>=1.10 => {
                     if self.fapcraft_bia_start_scene(id,waiting) {
                         bed_approaches().lock().unwrap_or_else(|e|e.into_inner())
                             .remove(&id);
@@ -370,10 +370,12 @@ impl Game<'_> {
         let mut held=bia_screen_fade().lock().unwrap_or_else(|e|e.into_inner());
         let Some(start)=*held else {return;};
         let t=start.elapsed().as_secs_f32();
-        if t>=0.86 { *held=None; return; }
+        // Original em.java counts j=22 ticks (~1.1 s) before relocating
+        // both actors. Hold black through that hand-off, then fade out.
+        if t>=1.60 { *held=None; return; }
         let opacity=if t<0.32 {(t/0.32*255.0) as u8}
-            else if t<0.50 {255}
-            else {((0.86-t)/0.36*255.0) as u8};
+            else if t<1.18 {255}
+            else {((1.60-t)/0.42*255.0) as u8};
         let (width,height)=(batch.width,batch.height);
         batch.fill(&self.gui.atlas,0.0,0.0,width,height,
             rgba(0,0,0,opacity));
