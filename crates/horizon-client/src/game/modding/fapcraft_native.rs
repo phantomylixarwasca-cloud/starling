@@ -199,7 +199,10 @@ pub(crate) fn stop_bia_sequence(id: u32) -> bool {
     }).is_some()
 }
 fn paired_clip(name: &str) -> bool {
-    name.starts_with("anal_") || name.starts_with("prone_doggy_")
+    // Bed preparation and idle must never immobilize the player: they need
+    // to walk toward Bia before the paired controller begins.
+    (name.starts_with("anal_") && !matches!(name,"anal_prepare"|"anal_wait"))
+        || name.starts_with("prone_doggy_")
 }
 /// Contact interactions temporarily stop player walking, as the original
 /// two-actor controller does. The ordinary player movement loop restores its
