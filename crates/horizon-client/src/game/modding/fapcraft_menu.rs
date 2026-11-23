@@ -15,11 +15,24 @@ use std::{collections::HashMap, sync::{Mutex, OnceLock}, time::Instant};
 struct BedApproach {
     choice: &'static str,
     target: [f64; 3],
+    yaw: f32,
     phase: BedPhase,
+    started: Instant,
+    retry_at: Instant,
+    distance_at_retry: f64,
+    stalled: u8,
+    manual: bool,
 }
 #[derive(Clone, Copy, Debug)]
-enum BedPhase { Navigating, Preparing(Instant), Waiting }
+enum BedPhase { Navigating, Preparing(Instant), Waiting, Fading(Instant) }
+#[derive(Clone, Copy)]
+struct BedTarget { at: [f64; 3], yaw: f32 }
 static BED_APPROACHES: OnceLock<Mutex<HashMap<u32, BedApproach>>> = OnceLock::new();
+static BIA_SCREEN_FADE: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+fn bia_screen_fade() -> &'static Mutex<Option<Instant>> {
+    BIA_SCREEN_FADE.get_or_init(|| Mutex::new(None))
+}
+
 fn bed_approaches() -> &'static Mutex<HashMap<u32, BedApproach>> {
     BED_APPROACHES.get_or_init(||Mutex::new(HashMap::new()))
 }
@@ -210,52 +223,139 @@ fn button_rect(x:f32,y:f32,w:f32,i:usize)->(f32,f32,f32,f32) {
 impl Game<'_> {
     /// Tick the original two-stage interaction: navigate, prepare, wait for
     /// proximity. Shift is read from the game's existing sneak-key state.
+    /// A portable version of e0.java's navigation/prepare/wait/transition
+    /// state machine. Retry pathing as the Forge NPC does at 60/120 ticks.
+    /// A collision-checked direct step is reserved for stalled navigation,
+    /// because Starling's inherited villager AI can replace the requested path.
     pub(super) fn fapcraft_bia_tick(&mut self) {
-        // PlayerMotion already exposes the active sneak/Shift state;
-        // native_player() is not a PlayerRef and cannot be passed here.
-        let fast=self.player.as_ref().is_some_and(|p| p.shift_key_down);
-        super::fapcraft_native::set_bia_fast(fast);
-        let waits: Vec<(u32,BedApproach)>=bed_approaches()
-            .lock().unwrap_or_else(|e|e.into_inner())
-            .iter().map(|(id,state)|(*id,*state)).collect();
+        use horizon_world::level::LevelAccess;
+        use horizon_core::geometry::Vec3;
+        super::fapcraft_native::set_bia_fast(
+            self.player.as_ref().is_some_and(|p| p.shift_key_down)
+        );
+        let waits:Vec<(u32,BedApproach)>=bed_approaches().lock()
+            .unwrap_or_else(|e|e.into_inner()).iter()
+            .map(|(&id,&state)|(id,state)).collect();
         for (id,waiting) in waits {
-            let Some(npc)=i32::try_from(id).ok()
-                .and_then(|number|self.level_entity(number))
-                .and_then(|target|self.target_position(target)) else {continue};
-            let distance=((npc[0]-waiting.target[0]).powi(2)
-                +(npc[1]-waiting.target[1]).powi(2)
-                +(npc[2]-waiting.target[2]).powi(2)).sqrt();
+            let Some(index)=self.mobs.iter().position(|mob|mob.id==id && !mob.removed) else {
+                bed_approaches().lock().unwrap_or_else(|e|e.into_inner()).remove(&id);
+                continue;
+            };
+            let at=self.mobs[index].position;
+            let dist=((at.x-waiting.target[0]).powi(2)
+                +(at.y-waiting.target[1]).powi(2)
+                +(at.z-waiting.target[2]).powi(2)).sqrt();
             match waiting.phase {
-                BedPhase::Navigating if distance<1.20 => {
-                    let clip=if waiting.choice=="ana" {"anal_prepare"} else {"sitdown"};
-                    super::fapcraft_native::trigger_social(id,"bia",clip);
-                    if let Some(state)=bed_approaches()
-                        .lock().unwrap_or_else(|e|e.into_inner()).get_mut(&id) {
+                BedPhase::Navigating if dist<0.65 => {
+                    let mob=&mut self.mobs[index];
+                    mob.nav_stop();
+                    mob.yaw=waiting.yaw;
+                    mob.body_yaw=waiting.yaw;
+                    mob.head_yaw=waiting.yaw;
+                    mob.needs_sync=true;
+                    super::fapcraft_native::trigger_social(id,"bia",
+                        if waiting.choice=="ana" {"anal_prepare"} else {"sitdown"});
+                    if let Some(state)=bed_approaches().lock()
+                        .unwrap_or_else(|e|e.into_inner()).get_mut(&id) {
                         state.phase=BedPhase::Preparing(Instant::now());
                     }
                 }
-                BedPhase::Preparing(started) if started.elapsed().as_secs_f32()
-                    >= 5.52 => {
-                    let clip=if waiting.choice=="ana" {"anal_wait"} else {"sitdownidle"};
-                    super::fapcraft_native::trigger_social(id,"bia",clip);
-                    if let Some(state)=bed_approaches()
-                        .lock().unwrap_or_else(|e|e.into_inner()).get_mut(&id) {
+                BedPhase::Navigating => {
+                    if waiting.started.elapsed().as_secs()>24 {
+                        bed_approaches().lock().unwrap_or_else(|e|e.into_inner())
+                            .remove(&id);
+                        self.send_overlay_message(Text::literal(
+                            "Bia: no logré llegar a la cama; despeja el camino"
+                        ));
+                        continue;
+                    }
+                    if waiting.retry_at.elapsed().as_secs_f32()>=1.0 && !waiting.manual {
+                        // A fresh route after the vanilla mob's AI goals have
+                        // run prevents the old one-shot order from being lost.
+                        let mut mobs=self.mobs.lift();
+                        let _=mobs[index].nav_move_to(
+                            &self.mob_world_base(&[]),waiting.target,0.35);
+                        self.mobs.restore(mobs,
+                            horizon_client::join_seq::RestoreOrder::SurvivorsFirst);
+                        let stalled=if waiting.distance_at_retry-dist<0.08 {
+                            waiting.stalled.saturating_add(1)
+                        } else { 0 };
+                        if let Some(state)=bed_approaches().lock()
+                            .unwrap_or_else(|e|e.into_inner()).get_mut(&id) {
+                            state.retry_at=Instant::now();
+                            state.distance_at_retry=dist;
+                            state.stalled=stalled;
+                            state.manual=stalled>=3;
+                        }
+                    }
+                    if waiting.manual {
+                        // Last resort for an obstructed/overridden nav goal.
+                        // Never phase Bia through a wall or unsupported floor.
+                        let step=0.065_f64.min(dist);
+                        let to=[
+                            at.x+(waiting.target[0]-at.x)*step/dist.max(0.001),
+                            at.y+(waiting.target[1]-at.y)*step/dist.max(0.001),
+                            at.z+(waiting.target[2]-at.z)*step/dist.max(0.001),
+                        ];
+                        let y=to[1].floor() as i32;
+                        let clear=[-0.24_f64,0.24].iter().all(|&dx| {
+                            [-0.24_f64,0.24].iter().all(|&dz| {
+                                let x=(to[0]+dx).floor() as i32;
+                                let z=(to[2]+dz).floor() as i32;
+                                self.world.loaded(x,z)
+                                    && self.world.block(x,y,z).0==0
+                                    && self.world.block(x,y+1,z).0==0
+                                    && self.world.block(x,y-1,z).0!=0
+                            })
+                        });
+                        if clear {
+                            let mob=&mut self.mobs[index];
+                            mob.position=Vec3::new(to[0],to[1],to[2]);
+                            mob.yaw=waiting.yaw;
+                            mob.body_yaw=waiting.yaw;
+                            mob.head_yaw=waiting.yaw;
+                            mob.needs_sync=true;
+                        }
+                    }
+                }
+                BedPhase::Preparing(start) if start.elapsed().as_secs_f32()>=5.52 => {
+                    super::fapcraft_native::trigger_social(id,"bia",
+                        if waiting.choice=="ana" {"anal_wait"} else {"sitdownidle"});
+                    if let Some(state)=bed_approaches().lock()
+                        .unwrap_or_else(|e|e.into_inner()).get_mut(&id) {
                         state.phase=BedPhase::Waiting;
                     }
                 }
-                BedPhase::Waiting if distance<1.5 => {
+                BedPhase::Waiting if dist<1.2 => {
                     if let Some(player)=self.player.as_ref().map(|p|p.position) {
-                        let from_player=((npc[0]-player.x).powi(2)
-                            +(npc[1]-player.y).powi(2)
-                            +(npc[2]-player.z).powi(2)).sqrt();
-                        if from_player<1.9 && self.fapcraft_align_player_for_contact(id as i32) {
-                            bed_approaches().lock().unwrap_or_else(|e|e.into_inner())
-                                .remove(&id);
-                            super::fapcraft_native::trigger_bia_sequence(id,waiting.choice);
-                            self.send_overlay_message(Text::literal(
-                                "Bia: interacción lista; mantén Shift para cambiar el ritmo"
-                            ));
+                        let near=((at.x-player.x).powi(2)
+                            +(at.y-player.y).powi(2)
+                            +(at.z-player.z).powi(2)).sqrt();
+                        if near<=1.0 {
+                            let now=Instant::now();
+                            *bia_screen_fade().lock().unwrap_or_else(|e|e.into_inner())
+                                = Some(now);
+                            if let Some(state)=bed_approaches().lock()
+                                .unwrap_or_else(|e|e.into_inner()).get_mut(&id) {
+                                state.phase=BedPhase::Fading(now);
+                            }
                         }
+                    }
+                }
+                BedPhase::Fading(start) if start.elapsed().as_secs_f32()>=0.34 => {
+                    if self.fapcraft_bia_start_scene(id,waiting) {
+                        bed_approaches().lock().unwrap_or_else(|e|e.into_inner())
+                            .remove(&id);
+                        super::fapcraft_native::trigger_bia_sequence(id,waiting.choice);
+                    } else {
+                        *bia_screen_fade().lock().unwrap_or_else(|e|e.into_inner())=None;
+                        if let Some(state)=bed_approaches().lock()
+                            .unwrap_or_else(|e|e.into_inner()).get_mut(&id) {
+                            state.phase=BedPhase::Waiting;
+                        }
+                        self.send_overlay_message(Text::literal(
+                            "Bia: necesito espacio libre para la transición"
+                        ));
                     }
                 }
                 _ => {}
@@ -263,18 +363,42 @@ impl Game<'_> {
         }
     }
 
+    /// The original Forge camera briefly faded to black when the player
+    /// reached the waiting character. Draw the transition above the gameplay
+    /// HUD so it also works in Android first-person and third-person modes.
+    pub(super) fn fapcraft_bia_draw_fade(&self,batch:&mut HudBatch) {
+        let mut held=bia_screen_fade().lock().unwrap_or_else(|e|e.into_inner());
+        let Some(start)=*held else {return;};
+        let t=start.elapsed().as_secs_f32();
+        if t>=0.86 { *held=None; return; }
+        let opacity=if t<0.32 {(t/0.32*255.0) as u8}
+            else if t<0.50 {255}
+            else {((0.86-t)/0.36*255.0) as u8};
+        batch.fill(&self.gui.atlas,0.0,0.0,batch.width,batch.height,
+            rgba(0,0,0,opacity));
+    }
+
+
     /// Find the closest reachable floor tile adjacent to a bed. The source
     /// mod e0.java scans Minecraft beds and refuses a blocked position.
     /// Limit our lookup to loaded chunks and require two air blocks at target.
-    fn fapcraft_bia_bed_target(&self, npc_id: i32) -> Option<[f64; 3]> {
+    fn fapcraft_bia_bed_target(&self,npc_id:i32) -> Option<BedTarget> {
         use horizon_world::level::LevelAccess;
-        let at = self.level_entity(npc_id).and_then(|entity|self.target_position(entity))?;
+        let at=self.level_entity(npc_id).and_then(|id|self.target_position(id))?;
         let center=[at[0].floor() as i32,at[1].floor() as i32,at[2].floor() as i32];
-        let mut best:Option<([f64; 3],f64)>=None;
+        // e0.java's ad[] and ai[] arrays: NPC stands next to the bed,
+        // oriented toward its centre rather than occupying an arbitrary tile.
+        let candidates=[
+            ([0.5,0.0,-0.5],0.0),
+            ([0.5,0.0,1.5],180.0),
+            ([-0.5,0.0,0.5],-90.0),
+            ([1.5,0.0,0.5],90.0),
+        ];
+        let mut best:Option<(BedTarget,f64)>=None;
         for dx in -13..=13 {
             for dz in -13..=13 {
                 let (bx,bz)=(center[0]+dx,center[2]+dz);
-                if !self.world.loaded(bx,bz) { continue; }
+                if !self.world.loaded(bx,bz) {continue;}
                 for dy in -2..=2 {
                     let by=center[1]+dy;
                     let state=self.world.block(bx,by,bz);
@@ -282,71 +406,108 @@ impl Game<'_> {
                     if !block.starts_with("minecraft:") || !block.ends_with("_bed") {
                         continue;
                     }
-                    for (ox,oz) in [(0,1),(0,-1),(1,0),(-1,0)] {
-                        let (x,z)=(bx+ox,bz+oz);
-                        if !self.world.loaded(x,z) {continue}
-                        if self.world.block(x,by,z).0!=0
-                            || self.world.block(x,by+1,z).0!=0
-                            || self.world.block(x,by-1,z).0==0 {
-                            continue;
-                        }
-                        let goal=[x as f64+0.5,by as f64,z as f64+0.5];
-                        let d=(goal[0]-at[0]).powi(2)+(goal[1]-at[1]).powi(2)
+                    for (offset,yaw) in candidates {
+                        let goal=[bx as f64+offset[0],by as f64,
+                            bz as f64+offset[2]];
+                        let (x,y,z)=(goal[0].floor() as i32,
+                            goal[1].floor() as i32,goal[2].floor() as i32);
+                        if !self.world.loaded(x,z)
+                            || self.world.block(x,y,z).0!=0
+                            || self.world.block(x,y+1,z).0!=0
+                            || self.world.block(x,y-1,z).0==0 {continue;}
+                        let dist=(goal[0]-at[0]).powi(2)
+                            +(goal[1]-at[1]).powi(2)
                             +(goal[2]-at[2]).powi(2);
-                        if best.is_none_or(|(_,old)|d<old) {
-                            best=Some((goal,d));
+                        if best.is_none_or(|(_,old)|dist<old) {
+                            best=Some((BedTarget{at:goal,yaw},dist));
                         }
                     }
                 }
             }
         }
-        best.map(|(point,_)|point)
+        best.map(|(target,_)|target)
     }
+
 
     /// Begin the navigation; a right-click once both characters approach
     /// the bed completes the hand-off. This prevents the old instant scene.
-    fn fapcraft_bia_request_bed(&mut self, id:i32, choice:&'static str) -> bool {
-        let Some(target)=self.fapcraft_bia_bed_target(id) else {
+    fn fapcraft_bia_request_bed(&mut self,id:i32,choice:&'static str)->bool {
+        let Some(bed)=self.fapcraft_bia_bed_target(id) else {
             self.send_overlay_message(Text::literal(
                 "Bia: necesitas una cama cercana con espacio libre"
             ));
             return false;
         };
-        // fapcraft_open_interaction runs from the client-side native UI.
-        // Game::mob(EntityRef) is a *server-only* handle and returns None on
-        // Android even when the NPC is visible and alive. The game already
-        // resolved Bia's live ID for the interaction; use its local Mob
-        // instance directly instead of treating a missing MobRef as a missing
-        // character. This follows the same borrow-safe navigation routine as
-        // native_mob_navigation.rs.
-        let Some(mob_id)=u32::try_from(id).ok() else {
-            self.send_overlay_message(Text::literal("Bia: identificador inválido"));
-            return false;
-        };
-        let Some(index)=self.mobs.iter().position(|mob|mob.id==mob_id && !mob.removed) else {
+        let Some(mob_id)=u32::try_from(id).ok() else {return false};
+        let Some(index)=self.mobs.iter().position(|m|m.id==mob_id && !m.removed)
+        else {
             self.send_overlay_message(Text::literal(
-                "Bia está visible, pero su entidad móvil no está cargada"
+                "Bia: la entidad móvil no está cargada"
             ));
             return false;
         };
         let mut mobs=self.mobs.lift();
-        let started=mobs[index].nav_move_to(&self.mob_world_base(&[]),target,0.45);
+        mobs[index].nav_stop();
+        let started=mobs[index].nav_move_to(&self.mob_world_base(&[]),bed.at,0.35);
         self.mobs.restore(mobs,horizon_client::join_seq::RestoreOrder::SurvivorsFirst);
         if !started {
             self.send_overlay_message(Text::literal(
-                "Bia no puede iniciar la ruta hacia la cama; despeja el camino"
+                "Bia: no encontré una ruta hasta la cama"
             ));
             return false;
         }
-        if let Ok(id)=u32::try_from(id) {
-            bed_approaches().lock().unwrap_or_else(|e|e.into_inner())
-                .insert(id,BedApproach{choice,target,phase:BedPhase::Navigating});
-        }
+        let at=self.mobs[index].position;
+        let initial=((at.x-bed.at[0]).powi(2)
+            +(at.y-bed.at[1]).powi(2)
+            +(at.z-bed.at[2]).powi(2)).sqrt();
+        let now=Instant::now();
+        bed_approaches().lock().unwrap_or_else(|e|e.into_inner()).insert(
+            mob_id,BedApproach{choice,target:bed.at,yaw:bed.yaw,
+                phase:BedPhase::Navigating,started:now,retry_at:now,
+                distance_at_retry:initial,stalled:0,manual:false});
         self.send_overlay_message(Text::literal(
-            "Bia se dirige a la cama. Acércate y vuelve a interactuar con ella."
+            "Bia se dirige a la cama. Acércate cuando termine de prepararse."
         ));
         true
     }
+
+    /// Reposition both actors *under the black fade*, not when a menu option
+    /// is selected. Keep player feet in a solid, non-obstructed spot.
+    fn fapcraft_bia_start_scene(&mut self,id:u32,waiting:BedApproach)->bool {
+        use horizon_world::level::LevelAccess;
+        use horizon_core::geometry::Vec3;
+        let angle=f64::from(waiting.yaw).to_radians();
+        let forward=[-angle.sin(),angle.cos()];
+        let player=[
+            waiting.target[0]-forward[0]*0.8,
+            waiting.target[1],
+            waiting.target[2]-forward[1]*0.8,
+        ];
+        let (x,y,z)=(player[0].floor() as i32,player[1].floor() as i32,
+            player[2].floor() as i32);
+        if !self.world.loaded(x,z)
+            || self.world.block(x,y,z).0!=0
+            || self.world.block(x,y+1,z).0!=0
+            || self.world.block(x,y-1,z).0==0 {return false;}
+        let Some(index)=self.mobs.iter().position(|m|m.id==id && !m.removed)
+            else {return false;};
+        self.teleport_to(super::commands::Target::Player,player,
+            Some([waiting.yaw,0.0]),false);
+        let mob=&mut self.mobs[index];
+        mob.nav_stop();
+        mob.yaw=waiting.yaw;
+        mob.body_yaw=waiting.yaw;
+        mob.head_yaw=waiting.yaw;
+        if waiting.choice=="doggy" {
+            mob.position=Vec3::new(
+                waiting.target[0]+forward[0]*0.95,
+                waiting.target[1]+0.56,
+                waiting.target[2]+forward[1]*0.95);
+        }
+        mob.needs_sync=true;
+        true
+    }
+
 
     /// Align the player in Bia's frontal hand-reach zone. This also keeps
     /// her face toward the player when the player initiates the gesture from
@@ -394,34 +555,21 @@ impl Game<'_> {
         }
         if kind=="bia" {
             if let Ok(number)=u32::try_from(id) {
-                let pending=bed_approaches().lock().unwrap_or_else(|e|e.into_inner())
-                    .get(&number).copied();
-                if let Some(waiting)=pending {
-                    let npc=self.level_entity(id).and_then(|entity|self.target_position(entity));
-                    let player=self.player.as_ref().map(|p|p.position);
-                    if let (Some(npc),Some(player))=(npc,player) {
-                        let dist_to_bed=((npc[0]-waiting.target[0]).powi(2)
-                            +(npc[2]-waiting.target[2]).powi(2)).sqrt();
-                        let dist_to_player=((npc[0]-player.x).powi(2)
-                            +(npc[1]-player.y).powi(2)
-                            +(npc[2]-player.z).powi(2)).sqrt();
-                        if dist_to_bed<1.2 && dist_to_player<2.25 {
-                            if self.fapcraft_align_player_for_contact(id) {
-                                bed_approaches().lock().unwrap_or_else(|e|e.into_inner()).remove(&number);
-                                super::fapcraft_native::trigger_bia_sequence(number,waiting.choice);
-                                self.send_overlay_message(Text::literal("Bia: interacción iniciada"));
-                                return;
-                            }
-                        } else {
-                            self.send_overlay_message(Text::literal(
-                                "Bia: espera a que llegue a la cama y acércate"
-                            ));
-                            return;
-                        }
-                    }
+                if let Some(waiting)=bed_approaches()
+                    .lock().unwrap_or_else(|e|e.into_inner())
+                    .get(&number).copied() {
+                    self.send_overlay_message(Text::literal(match waiting.phase {
+                        BedPhase::Navigating => "Bia está caminando hacia la cama",
+                        BedPhase::Preparing(_) => "Bia se está preparando",
+                        BedPhase::Waiting => "Acércate a Bia para continuar",
+                        BedPhase::Fading(_) => "Bia: comenzando la transición",
+                    }));
+                    return;
                 }
             }
         }
+
+
         let Some(kind) = (match kind {
             "jenny"=>Some("jenny"),"ellie"=>Some("ellie"),
             "slime"=>Some("slime"),"bia"=>Some("bia"),
