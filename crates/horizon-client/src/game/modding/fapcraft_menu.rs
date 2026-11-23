@@ -312,14 +312,29 @@ impl Game<'_> {
             ));
             return false;
         };
-        let Some(mob)=u32::try_from(id).ok()
-            .and_then(|id|self.entity(id)).and_then(|entity|self.mob(entity)) else {
-            self.send_overlay_message(Text::literal("Bia: no encuentro el NPC activo"));
+        // fapcraft_open_interaction runs from the client-side native UI.
+        // Game::mob(EntityRef) is a *server-only* handle and returns None on
+        // Android even when the NPC is visible and alive. The game already
+        // resolved Bia's live ID for the interaction; use its local Mob
+        // instance directly instead of treating a missing MobRef as a missing
+        // character. This follows the same borrow-safe navigation routine as
+        // native_mob_navigation.rs.
+        let Some(mob_id)=u32::try_from(id).ok() else {
+            self.send_overlay_message(Text::literal("Bia: identificador inválido"));
             return false;
         };
-        if !self.mob_move_to(mob,target,0.45) {
+        let Some(index)=self.mobs.iter().position(|mob|mob.id==mob_id && !mob.removed) else {
             self.send_overlay_message(Text::literal(
-                "Bia: no puedo llegar a la cama; despeja el camino"
+                "Bia está visible, pero su entidad móvil no está cargada"
+            ));
+            return false;
+        };
+        let mut mobs=self.mobs.lift();
+        let started=mobs[index].nav_move_to(&self.mob_world_base(&[]),target,0.45);
+        self.mobs.restore(mobs,horizon_client::join_seq::RestoreOrder::SurvivorsFirst);
+        if !started {
+            self.send_overlay_message(Text::literal(
+                "Bia no puede iniciar la ruta hacia la cama; despeja el camino"
             ));
             return false;
         }
