@@ -368,6 +368,15 @@ impl Game<'_> {
     /// right click updates the target rather than opening an unrelated screen.
     pub(super) fn fapcraft_open_interaction(&mut self, id:i32, kind:&str) {
         if kind=="bia" {
+            if let Ok(number)=u32::try_from(id)
+                && super::fapcraft_native::stop_bia_sequence(number) {
+                self.send_overlay_message(Text::literal(
+                    "Bia: interacción finalizada"
+                ));
+                return;
+            }
+        }
+        if kind=="bia" {
             if let Ok(number)=u32::try_from(id) {
                 let pending=bed_approaches().lock().unwrap_or_else(|e|e.into_inner())
                     .get(&number).copied();
