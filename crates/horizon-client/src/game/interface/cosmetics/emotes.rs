@@ -32,6 +32,8 @@ pub(in crate::game) struct Emotes {
     /// The camera the emote pulled back from, put back when it ends (unless the player chose
     /// another meanwhile).
     camera_from: Option<CameraType>,
+    /// Camera used before Fapcraft's paired character gesture.
+    fapcraft_camera_from: Option<CameraType>,
     /// Where the player stood when it started.
     from: Option<horizon_core::geometry::Vec3>,
 }
@@ -208,8 +210,36 @@ impl Game<'_> {
     /// puts the camera back, and hands it to the model.
     fn tick_emote(&mut self) {
         if self.cosmetics.emotes.playing.is_none() {
+            // Fapcraft contact actions pose the actual player's humanoid
+            // skeleton. The view pulls behind the player so both participants
+            // are visible, then restores the user's camera on completion.
+            let paired = crate::game::fapcraft_native::paired_action_active();
+            if paired && self.camera_type.is_first_person() {
+                self.cosmetics.emotes.fapcraft_camera_from = Some(self.camera_type);
+                self.camera_type = CameraType::ThirdPersonBack;
+                self.check_entity_post_effect(false);
+            } else if !paired {
+                if let Some(from) = self.cosmetics.emotes.fapcraft_camera_from.take()
+                    && self.camera_type == CameraType::ThirdPersonBack
+                {
+                    self.camera_type = from;
+                    self.check_entity_post_effect(from.is_first_person());
+                }
+            }
             if let Some(m) = self.player_model.as_mut() {
-                set_playing(m, None);
+                let ours = m.emote.as_ref().is_some_and(|pose| {
+                    let any: &dyn std::any::Any = &**pose;
+                    any.is::<crate::game::fapcraft_native::FapcraftPlayerPose>()
+                });
+                if paired {
+                    if !ours {
+                        m.emote = Some(Arc::new(crate::game::fapcraft_native::FapcraftPlayerPose));
+                    }
+                } else if ours {
+                    m.emote = None;
+                } else {
+                    set_playing(m, None);
+                }
             }
             return;
         }
