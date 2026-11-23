@@ -873,6 +873,19 @@ impl Game<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn bia_places_doggy_pose_on_bed_surface() {
+        let at=bia_staged_pose("doggy",[10.5,64.0,9.5],0.0);
+        assert!((at[0]-10.5).abs()<1e-6);
+        assert!((at[1]-64.5625).abs()<1e-6);
+        assert!((at[2]-10.45).abs()<1e-6);
+        let west=bia_staged_pose("doggy",[9.5,64.0,10.5],-90.0);
+        assert!((west[0]-10.45).abs()<1e-6);
+    }
+    #[test] fn bia_anal_prepares_beside_bed() {
+        let at=bia_staged_pose("ana",[10.5,64.0,9.5],0.0);
+        assert!((at[2]-9.88).abs()<1e-6);
+        assert!((at[1]-64.0).abs()<1e-6);
+    }
     #[test] fn menu_has_no_fake_functional_buttons() {
         assert_eq!(labels("jenny",0,Page::Actions).len(),7);
         assert_eq!(labels("bee",0,Page::Actions).len(),4);
