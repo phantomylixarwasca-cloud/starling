@@ -450,7 +450,7 @@ fn bia_audio_categories(effect:&str)-> &'static [(&'static str,usize)] {
         "anal_prepareMSG1" => &[("misc.plob",1)],
         "anal_prepareMSG2" => &[("misc.bedrustle",2)],
         "anal_startMSG1" => &[("girls.bia.mmm",8),("misc.pounding",36)],
-        "anal_startMSG2" | "anal_slowMSG1" =>
+        "anal_startMSG2" | "anal_slowMSG1" | "anal_fastMSG1" =>
             &[("misc.pounding",36),("girls.bia.ahh",8)],
         "anal_cumMSG2" => &[("girls.bia.ahh",8)],
         "slide" => &[("misc.slide",7)],
@@ -458,6 +458,24 @@ fn bia_audio_categories(effect:&str)-> &'static [(&'static str,usize)] {
         "doggyMoan" => &[("girls.bia.ahh",8),("girls.bia.mmm",8)],
         "cum" => &[("misc.inserts",5)],
         _=>&[],
+    }
+}
+
+/// e0.class specifies a few exact sample indices instead of selecting
+/// randomly from the sounds. Keep these fixed for the source dialogue.
+fn bia_fixed_audio_index(effect:&str,base:&str)->Option<usize> {
+    match (effect,base) {
+        ("anal_startMSG1","girls.bia.mmm")=>Some(3),
+        ("anal_startMSG1","misc.pounding")=>Some(34),
+        ("anal_prepareMSG1","misc.plob")=>Some(0),
+        ("anal_prepareMSG2","misc.bedrustle")=>Some(0),
+        ("headpatMSG1","girls.bia.breath")=>Some(0),
+        ("headpatMSG2","girls.bia.mmm")=>Some(0),
+        ("headpatMSG3","girls.bia.huh")=>Some(0),
+        ("headpatMSG4","girls.bia.giggle")=>Some(1),
+        ("orgasm1","girls.bia.mmm")=>Some(6),
+        ("orgasm2","girls.bia.mmm")=>Some(7),
+        _=>None,
     }
 }
 
@@ -492,8 +510,16 @@ pub(crate) fn take_bia_sound_events()->Vec<String> {
                 cue.time>previous || cue.time<=time
             };
             if !crossed {continue}
-            for &(base,variants) in bia_audio_categories(&cue.effect) {
-                let index=(id as usize + state.sound_counter as usize) % variants;
+            let categories=bia_audio_categories(&cue.effect);
+            // The Java doggyMoan cue randomly selects ONE of two voice
+            // categories, not both at once.
+            let groups=if cue.effect=="doggyMoan" {
+                let choice=(id as usize + state.sound_counter as usize)%2;
+                &categories[choice..choice+1]
+            } else {categories};
+            for &(base,variants) in groups {
+                let index=bia_fixed_audio_index(&cue.effect,base)
+                    .unwrap_or((id as usize + state.sound_counter as usize)%variants);
                 state.sound_counter=state.sound_counter.wrapping_add(1);
                 // Names exactly match the original JAR's sounds.json and
                 // the audio copied into Fapcraft 0.5.2.
@@ -1037,6 +1063,8 @@ mod tests {
     fn bia_voices_follow_original_keyframe_categories() {
         assert_eq!(bia_audio_categories("sitdownMSG1"),&[("girls.bia.breath",4)]);
         assert_eq!(bia_audio_categories("doggyMoan").len(),2);
+        assert_eq!(bia_audio_categories("anal_fastMSG1").len(),2);
+        assert_eq!(bia_fixed_audio_index("anal_startMSG1","girls.bia.mmm"),Some(3));
         assert!(bia_audio_categories("doggyReset").is_empty());
         let parsed=clip(&serde_json::json!({"animations":{"animation.bia.test":{
             "animation_length":2.0,"bones":{},"sound_effects":{
