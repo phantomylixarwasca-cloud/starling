@@ -304,6 +304,12 @@ fn visit(rig: &Rig, index: usize, clip: Option<&Clip>, time: f32, draw:&mut dyn 
     draw.pop();
 }
 
+/// Starling's 0° body yaw is south; the original GeoRenderer transforms
+/// its model from a north-facing rest coordinate system.
+fn geckolib_model_yaw(body_yaw: f32) -> f32 {
+    (180.0 - body_yaw).rem_euclid(360.0)
+}
+
 struct Renderer(usize);
 impl EntityRenderer for Renderer {
     fn submit(&self,entity:&EntityRenderState,draw:&mut dyn BlockEntityDrawContext)->Result<(),String> {
@@ -318,11 +324,14 @@ impl EntityRenderer for Renderer {
             else {rig.idle.as_ref()};
         let time=clip.map_or(0.0,|c| (entity.age * 0.05 * if speed>0.65 {1.4} else {1.0}).rem_euclid(c.duration));
         draw.push();
+        // GeckoLib's MobRenderer pose applies the character's baked
+        // 180-degree forward-axis correction. Without it our mesh looked
+        // toward the player while its living-entity AI walked away.
         if let Some(living)=entity.living {
-            draw.rotate_about([0.0,1.0,0.0],-living.body_rot,[0.0;3]);
+            draw.rotate_about([0.0,1.0,0.0],geckolib_model_yaw(living.body_rot),[0.0;3]);
             draw.scale([living.scale,living.scale,living.scale]);
             if living.death_time>0.0 {draw.rotate_about([0.0,0.0,1.0],(living.death_time*4.5).min(90.0),[0.0,0.6,0.0]);}
-        } else {draw.rotate_about([0.0,1.0,0.0],-entity.yaw,[0.0;3]);}
+        } else {draw.rotate_about([0.0,1.0,0.0],geckolib_model_yaw(entity.yaw),[0.0;3]);}
         for root in &rig.roots {visit(rig,*root,clip,time,draw,0);}
         draw.pop();
         Ok(())
@@ -340,6 +349,13 @@ pub(super) fn install(registry: &mut dyn EntityRenderers) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fapcraft_north_south_facing_regression() {
+        assert_eq!(geckolib_model_yaw(0.0),180.0);
+        assert_eq!(geckolib_model_yaw(90.0),90.0);
+        assert_eq!(geckolib_model_yaw(180.0),0.0);
+        assert_eq!(geckolib_model_yaw(-90.0),270.0);
+    }
     #[test]
     fn geckolib_faces_and_x_conversion() {
         let cube=BoxGeometry {origin:[1.0,2.0,3.0],size:[2.0,3.0,4.0],inflation:0.0,
