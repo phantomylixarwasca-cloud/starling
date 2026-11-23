@@ -333,6 +333,22 @@ fn brush_transform(left: bool, remaining: f32, partial: f32) -> glam::Mat4 {
     }
 }
 
+/// Extra hand rotations from a synchronized GeckoLib scene, or None to use
+/// unmodified vanilla arm transforms. The game installs/clears this every
+/// frame, so leaving the scene never changes normal Minecraft gameplay.
+static FAPCRAFT_POV_HANDS: std::sync::Mutex<Option<[[f32;3];2]>> =
+    std::sync::Mutex::new(None);
+pub fn set_fapcraft_pov_hands(value:Option<[[f32;3];2]>) {
+    let mut held=FAPCRAFT_POV_HANDS.lock()
+        .unwrap_or_else(|e|e.into_inner());
+    *held=value;
+}
+fn fapcraft_pov_hand(left:bool)->Option<[f32;3]> {
+    let held=FAPCRAFT_POV_HANDS.lock()
+        .unwrap_or_else(|e|e.into_inner());
+    (*held).map(|hands|hands[usize::from(left)])
+}
+
 /// `renderPlayerArm` up to `renderPlayerHand`: the pose of the bare `left`
 /// or right arm.
 pub fn player_arm_pose(left: bool, inverse_height: f32, attack: f32) -> glam::Mat4 {
@@ -347,7 +363,7 @@ pub fn player_arm_pose(left: bool, inverse_height: f32, attack: f32) -> glam::Ma
     let z_rot = (attack * attack * pi).msin();
     let y_rot = (root * pi).msin();
     let deg = |d: f32| d.to_radians();
-    Mat4::from_translation(Vec3::new(
+    let base=Mat4::from_translation(Vec3::new(
         f * (x + 0.640_000_05),
         y - 0.6 + inverse_height * -0.6,
         z + -0.719_999_97,
@@ -358,7 +374,12 @@ pub fn player_arm_pose(left: bool, inverse_height: f32, attack: f32) -> glam::Ma
         * Mat4::from_rotation_z(deg(f * 120.0))
         * Mat4::from_rotation_x(deg(200.0))
         * Mat4::from_rotation_y(deg(f * -135.0))
-        * Mat4::from_translation(Vec3::new(f * 5.6, 0.0, 0.0))
+        * Mat4::from_translation(Vec3::new(f * 5.6, 0.0, 0.0));
+    if let Some([rx,ry,rz])=fapcraft_pov_hand(left) {
+        // Apply the source partner's GeckoLib arm channels after vanilla's
+        // bare-hand placement so the texture remains the local player's skin.
+        base * Mat4::from_euler(glam::EulerRot::XYZ,rx,-ry,rz)
+    } else {base}
 }
 
 /// `renderTwoHandedMap` up to its arms: the swing, the tilt from the view
