@@ -7,7 +7,7 @@
 use mod_api::{BlockEntityDrawContext, EntityRenderState, EntityRenderer, EntityRenderers};
 use horizon_client::mobs::anim::BodyPose;
 use serde_json::Value;
-use std::{collections::HashMap, fs::File, io::Read, path::PathBuf, sync::{Arc, Mutex, OnceLock}, time::Instant};
+use std::{collections::HashMap, fs::File, io::Read, path::PathBuf, sync::{atomic::{AtomicBool,Ordering}, Arc, Mutex, OnceLock}, time::Instant};
 
 struct Character { id: &'static str, geo: &'static str, animation: &'static str, alias: &'static str }
 const CHARACTERS: [Character; 11] = [
@@ -52,6 +52,11 @@ struct SocialState {
     duration: f32,
     playlist: Option<&'static [&'static str]>,
     phase: usize,
+    session_started: Instant,
+}
+static BIA_FAST: AtomicBool = AtomicBool::new(false);
+pub(crate) fn set_bia_fast(value: bool) {
+    BIA_FAST.store(value, Ordering::Relaxed);
 }
 const BIA_DOGGY: &[&str] = &[
     "prone_doggy_intro", "prone_doggy_insert", "prone_doggy_soft",
@@ -154,6 +159,7 @@ pub(crate) fn trigger_social(id: u32, kind: &str, clip: &'static str) {
         duration,
         playlist: None,
         phase: 0,
+        session_started: Instant::now(),
     });
 }
 /// Preview of Bia's original clip sequences; input-driven speed and camera
@@ -254,15 +260,40 @@ impl BodyPose for FapcraftPlayerPose {
 fn social_pose(id: u32) -> Option<(SocialAction, f32)> {
     let mut actions = SOCIAL.get()?.lock().unwrap_or_else(|p| p.into_inner());
     let state = actions.get_mut(&id)?;
+    // No permanent lock if the player leaves unexpectedly.
+    if state.playlist.is_some() && state.session_started.elapsed().as_secs()>120 {
+        return None;
+    }
+    let duration = |key: &str| {
+        rigs().get(2).and_then(Option::as_ref)
+            .and_then(|rig| rig.actions.get(key))
+            .map_or(2.0, |clip| clip.duration.clamp(0.25, 12.0))
+    };
+    // In the original Java mod the player controls this transition. The
+    // prototype had played slow, fast and end automatically even without input.
+    let loop_choice = match state.action {
+        SocialAction::Clip("anal_slow" | "anal_fast") =>
+            Some(if BIA_FAST.load(Ordering::Relaxed) {"anal_fast"} else {"anal_slow"}),
+        SocialAction::Clip("prone_doggy_soft" | "prone_doggy_hard1") =>
+            Some(if BIA_FAST.load(Ordering::Relaxed) {"prone_doggy_hard1"} else {"prone_doggy_soft"}),
+        _ => None,
+    };
+    if let Some(clip)=loop_choice {
+        if state.action != SocialAction::Clip(clip) {
+            state.action = SocialAction::Clip(clip);
+            state.started = Instant::now();
+            state.duration = duration(clip);
+        }
+        return Some((state.action,state.started.elapsed().as_secs_f32()
+            .rem_euclid(state.duration.max(0.001))));
+    }
     let mut time = state.started.elapsed().as_secs_f32();
     if time >= state.duration {
         let next = state.playlist.and_then(|items| items.get(state.phase + 1)).copied();
         let Some(next) = next else { return None };
         state.phase += 1;
         state.action = SocialAction::Clip(next);
-        state.duration = rigs().get(2).and_then(Option::as_ref)
-            .and_then(|rig| rig.actions.get(next))
-            .map_or(2.0, |clip| clip.duration.clamp(0.25, 12.0));
+        state.duration = duration(next);
         state.started = Instant::now();
         time = 0.0;
     }
@@ -725,6 +756,13 @@ pub(super) fn install(registry: &mut dyn EntityRenderers) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bia_fast_toggle_is_explicit() {
+        set_bia_fast(true);
+        assert!(BIA_FAST.load(Ordering::Relaxed));
+        set_bia_fast(false);
+        assert!(!BIA_FAST.load(Ordering::Relaxed));
+    }
     #[test]
     fn bia_original_sequences_have_mapped_start_and_end() {
         assert_eq!(BIA_DOGGY.first().copied(), Some("prone_doggy_intro"));
