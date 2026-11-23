@@ -7,7 +7,19 @@ use horizon_client::{
     text::Text,
     ui,
 };
-use std::sync::{Mutex, OnceLock};
+use std::{collections::HashMap, sync::{Mutex, OnceLock}};
+
+/// Scene requests only become active once an actual bed is found and the NPC
+/// has reached it. This intentionally does not trigger a scene by menu click.
+#[derive(Clone, Copy, Debug)]
+struct BedApproach {
+    choice: &'static str,
+    target: [f64; 3],
+}
+static BED_APPROACHES: OnceLock<Mutex<HashMap<u32, BedApproach>>> = OnceLock::new();
+fn bed_approaches() -> &'static Mutex<HashMap<u32, BedApproach>> {
+    BED_APPROACHES.get_or_init(||Mutex::new(HashMap::new()))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page { Actions, Dialogue, Response, Companion }
@@ -193,6 +205,75 @@ fn button_rect(x:f32,y:f32,w:f32,i:usize)->(f32,f32,f32,f32) {
 }
 
 impl Game<'_> {
+    /// Find the closest reachable floor tile adjacent to a bed. The source
+    /// mod e0.java scans Minecraft beds and refuses a blocked position.
+    /// Limit our lookup to loaded chunks and require two air blocks at target.
+    fn fapcraft_bia_bed_target(&self, npc_id: i32) -> Option<[f64; 3]> {
+        use horizon_world::level::LevelAccess;
+        let at = self.level_entity(npc_id).and_then(|entity|self.target_position(entity))?;
+        let center=[at[0].floor() as i32,at[1].floor() as i32,at[2].floor() as i32];
+        let mut best:Option<([f64; 3],f64)>=None;
+        for dx in -13..=13 {
+            for dz in -13..=13 {
+                let (bx,bz)=(center[0]+dx,center[2]+dz);
+                if !self.world.loaded(bx,bz) { continue; }
+                for dy in -2..=2 {
+                    let by=center[1]+dy;
+                    let state=self.world.block(bx,by,bz);
+                    let block=&*self.res.facts().get(state).name;
+                    if !block.starts_with("minecraft:") || !block.ends_with("_bed") {
+                        continue;
+                    }
+                    for (ox,oz) in [(0,1),(0,-1),(1,0),(-1,0)] {
+                        let (x,z)=(bx+ox,bz+oz);
+                        if !self.world.loaded(x,z) {continue}
+                        if self.world.block(x,by,z).0!=0
+                            || self.world.block(x,by+1,z).0!=0
+                            || self.world.block(x,by-1,z).0==0 {
+                            continue;
+                        }
+                        let goal=[x as f64+0.5,by as f64,z as f64+0.5];
+                        let d=(goal[0]-at[0]).powi(2)+(goal[1]-at[1]).powi(2)
+                            +(goal[2]-at[2]).powi(2);
+                        if best.is_none_or(|(_,old)|d<old) {
+                            best=Some((goal,d));
+                        }
+                    }
+                }
+            }
+        }
+        best.map(|(point,_)|point)
+    }
+
+    /// Begin the navigation; a right-click once both characters approach
+    /// the bed completes the hand-off. This prevents the old instant scene.
+    fn fapcraft_bia_request_bed(&mut self, id:i32, choice:&'static str) -> bool {
+        let Some(target)=self.fapcraft_bia_bed_target(id) else {
+            self.send_overlay_message(Text::literal(
+                "Bia: necesitas una cama cercana con espacio libre"
+            ));
+            return false;
+        };
+        let Some(mob)=u32::try_from(id).ok()
+            .and_then(|id|self.entity(id)).and_then(|entity|self.mob(entity)) else {
+            self.send_overlay_message(Text::literal("Bia: no encuentro el NPC activo"));
+            return false;
+        };
+        if !self.mob_move_to(mob,target,0.45) {
+            self.send_overlay_message(Text::literal(
+                "Bia: no puedo llegar a la cama; despeja el camino"
+            ));
+            return false;
+        }
+        if let Ok(id)=u32::try_from(id) {
+            bed_approaches().lock().unwrap_or_else(|e|e.into_inner())
+                .insert(id,BedApproach{choice,target});
+        }
+        self.send_overlay_message(Text::literal(
+            "Bia se dirige a la cama. Acércate y vuelve a interactuar con ella."
+        ));
+        true
+    }
 
     /// Align the player in Bia's frontal hand-reach zone. This also keeps
     /// her face toward the player when the player initiates the gesture from
@@ -229,6 +310,36 @@ impl Game<'_> {
     /// Open a proper menu on the specific entity that was clicked. A repeated
     /// right click updates the target rather than opening an unrelated screen.
     pub(super) fn fapcraft_open_interaction(&mut self, id:i32, kind:&str) {
+        if kind=="bia" {
+            if let Ok(number)=u32::try_from(id) {
+                let pending=bed_approaches().lock().unwrap_or_else(|e|e.into_inner())
+                    .get(&number).copied();
+                if let Some(waiting)=pending {
+                    let npc=self.level_entity(id).and_then(|entity|self.target_position(entity));
+                    let player=self.player.as_ref().map(|p|p.position);
+                    if let (Some(npc),Some(player))=(npc,player) {
+                        let dist_to_bed=((npc[0]-waiting.target[0]).powi(2)
+                            +(npc[2]-waiting.target[2]).powi(2)).sqrt();
+                        let dist_to_player=((npc[0]-player.x).powi(2)
+                            +(npc[1]-player.y).powi(2)
+                            +(npc[2]-player.z).powi(2)).sqrt();
+                        if dist_to_bed<1.2 && dist_to_player<2.25 {
+                            if self.fapcraft_align_player_for_contact(id) {
+                                bed_approaches().lock().unwrap_or_else(|e|e.into_inner()).remove(&number);
+                                super::fapcraft_native::trigger_bia_sequence(number,waiting.choice);
+                                self.send_overlay_message(Text::literal("Bia: interacción iniciada"));
+                                return;
+                            }
+                        } else {
+                            self.send_overlay_message(Text::literal(
+                                "Bia: espera a que llegue a la cama y acércate"
+                            ));
+                            return;
+                        }
+                    }
+                }
+            }
+        }
         let Some(kind) = (match kind {
             "jenny"=>Some("jenny"),"ellie"=>Some("ellie"),
             "slime"=>Some("slime"),"bia"=>Some("bia"),
@@ -335,19 +446,26 @@ impl Game<'_> {
             },
             (Page::Actions,2) if menu.kind=="bia" => {
                 if let Ok(id)=u32::try_from(menu.entity) {
-                    let undressed=super::fapcraft_native::toggle_bia_dress(id);
-                    menu.response=if undressed {"Bia cambió de atuendo"} else {"Bia volvió a vestirse"};
-                    social=Some("strip");
-                    voice=true;
-                    close=true;
+                    if super::fapcraft_native::toggle_bia_dress(id).is_some() {
+                        menu.response="Bia está cambiándose";
+                        social=Some("strip");
+                        voice=true;
+                        close=true;
+                    } else {
+                        self.send_overlay_message(Text::literal(
+                            "Espera a que termine la animación de Bia"
+                        ));
+                    }
                 }
             },
             (Page::Dialogue,0..=1) if menu.kind=="bia" => {
-                // The original e0.java follows TALK_HORNY with two choices.
-                // Their GeckoLib clips live in the installed Fapcraft hmod.
-                scene=Some(if i==0 {"doggy"} else {"ana"});
-                menu.response="Interacción iniciada";
-                close=true;
+                let choice=if i==0 {"doggy"} else {"ana"};
+                // Do not play a clip until there is a suitable bed and Bia
+                // can start walking toward it, as the original Java requires.
+                if self.fapcraft_bia_request_bed(menu.entity,choice) {
+                    menu.response="Bia se dirige a la cama";
+                    close=true;
+                }
             },
             (Page::Dialogue,2) if menu.kind=="bia"=>menu.page=Page::Actions,
             (Page::Dialogue,3) if menu.kind=="bia"=>close=true,
