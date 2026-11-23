@@ -31,6 +31,9 @@ impl Game<'_> {
                 super::fapcraft_native::set_bia_first_person(
                     self.camera_type.is_first_person()
                 );
+                super::fapcraft_native::set_bia_jump(
+                    self.player.as_ref().is_some_and(|p|p.jumping)
+                );
                 // The GUI's player position is fresh here, while the
                 // authoritative world tick may only have a LAN Guest.
                 self.fapcraft_bia_check_proximity();
