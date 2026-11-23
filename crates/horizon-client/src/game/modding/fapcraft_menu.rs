@@ -246,15 +246,17 @@ impl Game<'_> {
             (Page::Actions,index) if index >= 1 && index <= character_actions(menu.kind).len() => {
                 let action=character_actions(menu.kind)[index-1];
                 menu.response=action.response;
-                menu.page=Page::Response;
+                // Forge's original m.java closes the menu when an action is
+                // chosen. Return to world view so the player can see and
+                // perform the paired gesture instead of staying in a dialog.
                 social=Some(action.clip);
                 voice=true;
+                close=true;
             },
             (Page::Actions,index) if index==character_actions(menu.kind).len()+1=>close=true,
             (Page::Dialogue,0..=2)=>{
                 menu.response=response(menu.kind,i);
-                menu.page=Page::Response;
-                social=Some("talk");voice=true;
+                social=Some("talk");voice=true;close=true;
             },
             (Page::Dialogue,3)=>menu.page=Page::Actions,
             (Page::Dialogue,4)=>close=true,
@@ -284,7 +286,12 @@ impl Game<'_> {
                     mod_api::SoundSource::Neutral,0.7,1.0,None);
             }
         }
-        if close {self.mod_screen_close("sexmod");}
+        if close {
+            if social.is_some() {
+                self.send_overlay_message(Text::literal(menu.response));
+            }
+            self.close_mod_screen();
+        }
     }
 }
 
