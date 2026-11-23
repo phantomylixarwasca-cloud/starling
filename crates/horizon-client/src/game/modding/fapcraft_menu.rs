@@ -108,6 +108,14 @@ impl Game<'_> {
         if self.mod_screen_open("sexmod") {
             *state().lock().unwrap_or_else(|e|e.into_inner()) =
                 Some(Menu{entity:id,kind,page:Page::Actions,response:""});
+        } else {
+            // Do not silently consume a click when the game refused to
+            // change screens; tell the player what actually happened.
+            log::warn!("Fapcraft interaction: could not open menu (screen={:?}, player={}, renderer={}, overlay={})",
+                self.screen, self.player.is_some(), self.renderer.is_some(), self.screen_over_playing());
+            self.send_overlay_message(Text::literal(
+                "Fapcraft: no se pudo abrir el menu (ver registro de Starling)",
+            ));
         }
     }
 

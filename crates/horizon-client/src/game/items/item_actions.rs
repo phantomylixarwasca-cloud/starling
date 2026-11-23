@@ -132,6 +132,13 @@ impl Game<'_> {
                     }),
             };
             let kind = self.target_type(entity);
+            // Fapcraft's built-in native UI gets first refusal on a direct
+            // entity click. A generic mob/mod hook must not consume this
+            // specific character click before the menu can open.
+            if self.fapcraft_social_on_click(id, &kind) {
+                self.swing_arm();
+                return Ok(true);
+            }
             let stack = self.held().cloned();
             let mut claimed = false;
             if let Some(location) = location {
@@ -161,10 +168,6 @@ impl Game<'_> {
             {
                 return Ok(self.interaction_consumed(answer));
             }
-            if self.fapcraft_social_on_click(id, &kind) {
-                self.swing_arm();
-                return Ok(true);
-            }
         }
         Ok(self.interact_frame(target)
             || self.interact_armor_stand(target)
@@ -186,10 +189,11 @@ impl Game<'_> {
         ) {
             return false;
         }
-        // A UI belongs to the local Android client, never the integrated
-        // server or another player's simulation.
-        if !self.options.execution_role.is_client() || self.lan_acting.is_some() {
-            return true;
+        // Android's local singleplayer simulation may use a role other
+        // than Client even though this Game owns the rendered window.
+        // Only the renderer/actor boundary tells us where a GUI can open.
+        if self.renderer.is_none() || self.lan_acting.is_some() {
+            return false;
         }
         self.fapcraft_open_interaction(id, name);
         true
