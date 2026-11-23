@@ -189,10 +189,12 @@ impl Game<'_> {
         ) {
             return false;
         }
-        // Android's local singleplayer simulation may use a role other
-        // than Client even though this Game owns the rendered window.
-        // Only the renderer/actor boundary tells us where a GUI can open.
-        if self.renderer.is_none() || self.lan_acting.is_some() {
+        // Android's loopback singleplayer can deliver the entity interaction
+        // while temporarily acting for the local simulated server player.
+        // The old lan_acting gate dropped that click into the vanilla villager
+        // interaction, producing the "no" animation instead of Fapcraft's UI.
+        // A graphical menu can only be opened by a Game with a renderer.
+        if self.renderer.is_none() {
             return false;
         }
         self.fapcraft_open_interaction(id, name);
