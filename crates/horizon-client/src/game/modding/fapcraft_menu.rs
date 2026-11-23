@@ -33,6 +33,19 @@ fn bia_screen_fade() -> &'static Mutex<Option<Instant>> {
     BIA_SCREEN_FADE.get_or_init(|| Mutex::new(None))
 }
 
+/// The bed search chooses a clear *walking* tile beside the bed. The source
+/// sitdown geometry is not centered on that tile. Stage the visible character
+/// toward the bed's surface only after navigation completes.
+fn bia_staged_pose(choice:&str, anchor:[f64;3],yaw:f32)->[f64;3] {
+    let angle=f64::from(yaw).to_radians();
+    let forward=[-angle.sin(),angle.cos()];
+    let (depth,height)=if choice=="doggy" {(0.95,0.5625)}
+        else {(0.38,0.0)};
+    [anchor[0]+forward[0]*depth,anchor[1]+height,
+        anchor[2]+forward[1]*depth]
+}
+
+
 fn bed_approaches() -> &'static Mutex<HashMap<u32, BedApproach>> {
     BED_APPROACHES.get_or_init(||Mutex::new(HashMap::new()))
 }
@@ -249,6 +262,11 @@ impl Game<'_> {
                 BedPhase::Navigating if dist<0.65 => {
                     let mob=&mut self.mobs[index];
                     mob.nav_stop();
+                    let pose=bia_staged_pose(waiting.choice,
+                        waiting.target,waiting.yaw);
+                    mob.position=Vec3::new(pose[0],pose[1],pose[2]);
+                    mob.previous=mob.position;
+                    mob.velocity=Vec3::ZERO;
                     mob.yaw=waiting.yaw;
                     mob.body_yaw=waiting.yaw;
                     mob.head_yaw=waiting.yaw;
@@ -326,12 +344,18 @@ impl Game<'_> {
                         state.phase=BedPhase::Waiting;
                     }
                 }
-                BedPhase::Waiting if dist<1.2 => {
+                BedPhase::Waiting => {
                     if let Some(player)=self.player.as_ref().map(|p|p.position) {
-                        let near=((at.x-player.x).powi(2)
-                            +(at.y-player.y).powi(2)
+                        // The visible animation body is offset from the entity
+                        // anchor and the player collision box. Check horizontal
+                        // reach to both the staged body and walking target.
+                        let near_body=((at.x-player.x).powi(2)
                             +(at.z-player.z).powi(2)).sqrt();
-                        if near<=1.0 {
+                        let near_anchor=((waiting.target[0]-player.x).powi(2)
+                            +(waiting.target[2]-player.z).powi(2)).sqrt();
+                        let level=(at.y-player.y).abs()
+                            .min((waiting.target[1]-player.y).abs());
+                        if near_body.min(near_anchor)<=2.2 && level<=1.65 {
                             let now=Instant::now();
                             *bia_screen_fade().lock().unwrap_or_else(|e|e.into_inner())
                                 = Some(now);
@@ -481,17 +505,28 @@ impl Game<'_> {
         use horizon_core::geometry::Vec3;
         let angle=f64::from(waiting.yaw).to_radians();
         let forward=[-angle.sin(),angle.cos()];
-        let player=[
-            waiting.target[0]-forward[0]*0.8,
-            waiting.target[1],
-            waiting.target[2]-forward[1]*0.8,
+        let lateral=[forward[1],-forward[0]];
+        let base=waiting.target;
+        let positions=[
+            [base[0]-forward[0]*0.8,base[1],base[2]-forward[1]*0.8],
+            [base[0]-forward[0]*1.3,base[1],base[2]-forward[1]*1.3],
+            [base[0]+lateral[0]*1.15,base[1],base[2]+lateral[1]*1.15],
+            [base[0]-lateral[0]*1.15,base[1],base[2]-lateral[1]*1.15],
         ];
-        let (x,y,z)=(player[0].floor() as i32,player[1].floor() as i32,
-            player[2].floor() as i32);
-        if !self.world.loaded(x,z)
-            || self.world.block(x,y,z).0!=0
-            || self.world.block(x,y+1,z).0!=0
-            || self.world.block(x,y-1,z).0==0 {return false;}
+        let standing=|position:[f64;3]| {
+            let (x,y,z)=(position[0].floor() as i32,
+                position[1].floor() as i32,position[2].floor() as i32);
+            self.world.loaded(x,z) && self.world.block(x,y,z).0==0
+                && self.world.block(x,y+1,z).0==0
+                && self.world.block(x,y-1,z).0!=0
+        };
+        // Multiple adjacent beds can obstruct the first player placement.
+        // Try clear neighboring tiles and, finally, the player's current
+        // location instead of failing the whole scene.
+        let player=positions.into_iter().find(|&pos|standing(pos))
+            .or_else(||self.player.as_ref().map(|p|[p.position.x,
+                p.position.y,p.position.z]).filter(|&pos|standing(pos)));
+        let Some(player)=player else {return false;};
         let Some(index)=self.mobs.iter().position(|m|m.id==id && !m.removed)
             else {return false;};
         self.teleport_to(super::commands::Target::Player,player,
@@ -501,12 +536,10 @@ impl Game<'_> {
         mob.yaw=waiting.yaw;
         mob.body_yaw=waiting.yaw;
         mob.head_yaw=waiting.yaw;
-        if waiting.choice=="doggy" {
-            mob.position=Vec3::new(
-                waiting.target[0]+forward[0]*0.95,
-                waiting.target[1]+0.56,
-                waiting.target[2]+forward[1]*0.95);
-        }
+        let pose=bia_staged_pose(waiting.choice,waiting.target,waiting.yaw);
+        mob.position=Vec3::new(pose[0],pose[1],pose[2]);
+        mob.previous=mob.position;
+        mob.velocity=Vec3::ZERO;
         mob.needs_sync=true;
         true
     }
@@ -561,12 +594,29 @@ impl Game<'_> {
                 if let Some(waiting)=bed_approaches()
                     .lock().unwrap_or_else(|e|e.into_inner())
                     .get(&number).copied() {
-                    self.send_overlay_message(Text::literal(match waiting.phase {
-                        BedPhase::Navigating => "Bia está caminando hacia la cama",
-                        BedPhase::Preparing(_) => "Bia se está preparando",
-                        BedPhase::Waiting => "Acércate a Bia para continuar",
-                        BedPhase::Fading(_) => "Bia: comenzando la transición",
-                    }));
+                    if matches!(waiting.phase,BedPhase::Waiting) {
+                        // Right-click proves the user can actually reach the
+                        // character. It must advance the scene, not repeat a
+                        // distance warning against Bia's animation pivot.
+                        let now=Instant::now();
+                        if let Some(state)=bed_approaches()
+                            .lock().unwrap_or_else(|e|e.into_inner())
+                            .get_mut(&number) {
+                            state.phase=BedPhase::Fading(now);
+                        }
+                        *bia_screen_fade().lock()
+                            .unwrap_or_else(|e|e.into_inner())=Some(now);
+                        self.send_overlay_message(Text::literal(
+                            "Bia: comenzando la transición"
+                        ));
+                    } else {
+                        self.send_overlay_message(Text::literal(match waiting.phase {
+                            BedPhase::Navigating => "Bia está caminando hacia la cama",
+                            BedPhase::Preparing(_) => "Bia se está preparando",
+                            BedPhase::Waiting => unreachable!(),
+                            BedPhase::Fading(_) => "Bia: comenzando la transición",
+                        }));
+                    }
                     return;
                 }
             }
