@@ -894,7 +894,7 @@ impl EntityRenderer for Renderer {
             && !BIA_FIRST_PERSON.load(Ordering::Relaxed) {
             if let Some(steve)=rig.bones.iter().position(|bone|bone.name=="steve") {
                 visit(rig,steve,clip,time,draw,0,false,true,
-                    "minecraft:entity/player/wide/steve");
+                    "sexmod:player/steve");
             }
         }
         draw.pop();
