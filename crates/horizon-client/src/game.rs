@@ -5695,7 +5695,14 @@ impl Game<'_> {
         let player_start = out.len();
         self.mark_motion(player_start, Self::MOTION_OWN_PLAYER);
         let player_alpha = self.own_player_alpha();
-        self.player_model_geometry(camera, player_alpha, &mut out);
+        // The original Forge renderer substitutes Bia's animated Steve
+        // subtree for the player's ordinary third-person mesh during a paired
+        // scene. Rendering BOTH left the user's avatar standing two blocks
+        // away, even while the paired skeleton was active on the bed.
+        // First-person hands use their own renderer and are not affected.
+        if !fapcraft_native::bia_session_active() {
+            self.player_model_geometry(camera, player_alpha, &mut out);
+        }
         if self.own_body_in_view()
             && let Some(p) = &self.player
             && p.fire_ticks > 0
