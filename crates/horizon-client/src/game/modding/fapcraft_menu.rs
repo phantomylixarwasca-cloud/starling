@@ -176,6 +176,35 @@ fn button_rect(x:f32,y:f32,w:f32,i:usize)->(f32,f32,f32,f32) {
 }
 
 impl Game<'_> {
+
+    /// The original Forge entity seats the player beside a character before a
+    /// two-actor clip (em.java -> func_70634_a). Align the local player's feet
+    /// one block in front, only where the two body blocks are clear. A collision
+    /// is a refusal, never a forced teleport through scenery.
+    fn fapcraft_align_player_for_contact(&mut self, entity_id:i32) -> bool {
+        use horizon_world::level::LevelAccess;
+        let Some(target) = self.level_entity(entity_id) else {return false};
+        let Some(npc) = self.target_position(target) else {return false};
+        let yaw = self.target_rotation(target)[0];
+        let rad = f64::from(yaw).to_radians();
+        let wanted = [
+            npc[0] - rad.sin()*1.05,
+            npc[1],
+            npc[2] + rad.cos()*1.05,
+        ];
+        if !wanted.iter().all(|v| v.is_finite()) {return false}
+        let (x,y,z)=(wanted[0].floor() as i32,wanted[1].floor() as i32,wanted[2].floor() as i32);
+        if !self.world.loaded(x,z)
+            || self.world.block(x,y,z).0 != 0
+            || self.world.block(x,y+1,z).0 != 0
+        {
+            return false;
+        }
+        self.teleport_to(super::commands::Target::Player, wanted,
+            Some([(yaw + 180.0).rem_euclid(360.0),0.0]),false);
+        true
+    }
+
     /// Open a proper menu on the specific entity that was clicked. A repeated
     /// right click updates the target rather than opening an unrelated screen.
     pub(super) fn fapcraft_open_interaction(&mut self, id:i32, kind:&str) {
@@ -276,6 +305,12 @@ impl Game<'_> {
                             ));
                             return;
                         }
+                    }
+                    if !self.fapcraft_align_player_for_contact(menu.entity) {
+                        self.send_overlay_message(Text::literal(
+                            "Busca un espacio libre frente al personaje",
+                        ));
+                        return;
                     }
                 }
                 menu.response=action.response;
