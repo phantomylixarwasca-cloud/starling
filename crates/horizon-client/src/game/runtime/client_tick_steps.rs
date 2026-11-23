@@ -25,6 +25,9 @@ impl Game<'_> {
                     self.tick_script_step(event_loop);
                 }
                 horizon_client::spans::time("tick", || self.tick())?;
+                // The GUI's player position is fresh here, while the
+                // authoritative world tick may only have a LAN Guest.
+                self.fapcraft_bia_check_proximity();
                 // Cave mood (a shader pack's playerMood) samples on a random
                 // seeded from the clock: under `HORIZON_STILL` it waits for the
                 // world and draws from its tick.
