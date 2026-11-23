@@ -29,6 +29,12 @@ enum BedPhase { Navigating, Preparing(Instant), Waiting, Fading(Instant) }
 struct BedTarget { at: [f64; 3], yaw: f32 }
 static BED_APPROACHES: OnceLock<Mutex<HashMap<u32, BedApproach>>> = OnceLock::new();
 static BIA_SCREEN_FADE: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+#[derive(Clone,Copy)]
+struct BiaPhysics { no_ai: bool, no_gravity: bool, no_physics: bool }
+static BIA_PHYSICS: OnceLock<Mutex<HashMap<u32,BiaPhysics>>> = OnceLock::new();
+fn bia_physics() -> &'static Mutex<HashMap<u32,BiaPhysics>> {
+    BIA_PHYSICS.get_or_init(||Mutex::new(HashMap::new()))
+}
 fn bia_screen_fade() -> &'static Mutex<Option<Instant>> {
     BIA_SCREEN_FADE.get_or_init(|| Mutex::new(None))
 }
@@ -39,8 +45,11 @@ fn bia_screen_fade() -> &'static Mutex<Option<Instant>> {
 fn bia_staged_pose(choice:&str, anchor:[f64;3],yaw:f32)->[f64;3] {
     let angle=f64::from(yaw).to_radians();
     let forward=[-angle.sin(),angle.cos()];
-    let (depth,height)=if choice=="doggy" {(0.95,0.5625)}
-        else {(0.38,0.0)};
+    // The source e0.java sits at the bed block's Y coordinate and disables
+    // gravity/physics in the preparation phase. Adding bed height here moved
+    // the whole animated model half a block into the air.
+    let depth=if choice=="doggy" {0.95} else {0.38};
+    let height=0.0;
     [anchor[0]+forward[0]*depth,anchor[1]+height,
         anchor[2]+forward[1]*depth]
 }
@@ -48,6 +57,13 @@ fn bia_staged_pose(choice:&str, anchor:[f64;3],yaw:f32)->[f64;3] {
 
 fn bed_approaches() -> &'static Mutex<HashMap<u32, BedApproach>> {
     BED_APPROACHES.get_or_init(||Mutex::new(HashMap::new()))
+}
+/// Always return a copy outside of the mutex guard. An if-let directly on
+/// lock().get().copied() keeps the guard alive throughout the if body; locking
+/// it again from the click handler previously deadlocked the game thread.
+fn bia_waiting_snapshot(id:u32) -> Option<BedApproach> {
+    let guard=bed_approaches().lock().unwrap_or_else(|e|e.into_inner());
+    guard.get(&id).copied()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,6 +265,23 @@ impl Game<'_> {
         let waits:Vec<(u32,BedApproach)>=bed_approaches().lock()
             .unwrap_or_else(|e|e.into_inner()).iter()
             .map(|(&id,&state)|(id,state)).collect();
+        // Restore the original mob flags when an interaction ends or expires.
+        // The original Forge NPC temporarily disables physics while sitting;
+        // leaving this enabled forever would break normal movement after exit.
+        let restoring:Vec<(u32,BiaPhysics)>=bia_physics().lock()
+            .unwrap_or_else(|e|e.into_inner()).iter()
+            .map(|(&id,&flags)|(id,flags)).collect();
+        for (id,flags) in restoring {
+            if waits.iter().any(|(active,_)|*active==id)
+                || super::fapcraft_native::social_active(id) {continue}
+            if let Some(mob)=self.mobs.iter_mut().find(|m|m.id==id && !m.removed) {
+                mob.no_ai=flags.no_ai;
+                mob.no_gravity=flags.no_gravity;
+                mob.no_physics=flags.no_physics;
+                mob.needs_sync=true;
+            }
+            bia_physics().lock().unwrap_or_else(|e|e.into_inner()).remove(&id);
+        }
         for (id,waiting) in waits {
             let Some(index)=self.mobs.iter().position(|mob|mob.id==id && !mob.removed) else {
                 bed_approaches().lock().unwrap_or_else(|e|e.into_inner()).remove(&id);
@@ -262,6 +295,15 @@ impl Game<'_> {
                 BedPhase::Navigating if dist<0.65 => {
                     let mob=&mut self.mobs[index];
                     mob.nav_stop();
+                    let flags=BiaPhysics{no_ai:mob.no_ai,
+                        no_gravity:mob.no_gravity,no_physics:mob.no_physics};
+                    bia_physics().lock().unwrap_or_else(|e|e.into_inner())
+                        .entry(id).or_insert(flags);
+                    // Match e0.java's sitdown: hold the animator at its source
+                    // pivot, rather than adding 9/16 blocks to the entity feet.
+                    mob.no_ai=true;
+                    mob.no_gravity=true;
+                    mob.no_physics=true;
                     let pose=bia_staged_pose(waiting.choice,
                         waiting.target,waiting.yaw);
                     mob.position=Vec3::new(pose[0],pose[1],pose[2]);
@@ -355,7 +397,7 @@ impl Game<'_> {
                             +(waiting.target[2]-player.z).powi(2)).sqrt();
                         let level=(at.y-player.y).abs()
                             .min((waiting.target[1]-player.y).abs());
-                        if near_body.min(near_anchor)<=2.2 && level<=1.65 {
+                        if near_body.min(near_anchor)<=2.8 && level<=2.0 {
                             let now=Instant::now();
                             *bia_screen_fade().lock().unwrap_or_else(|e|e.into_inner())
                                 = Some(now);
@@ -591,9 +633,8 @@ impl Game<'_> {
         }
         if kind=="bia" {
             if let Ok(number)=u32::try_from(id) {
-                if let Some(waiting)=bed_approaches()
-                    .lock().unwrap_or_else(|e|e.into_inner())
-                    .get(&number).copied() {
+                let waiting=bia_waiting_snapshot(number);
+                if let Some(waiting)=waiting {
                     if matches!(waiting.phase,BedPhase::Waiting) {
                         // Right-click proves the user can actually reach the
                         // character. It must advance the scene, not repeat a
@@ -876,10 +917,24 @@ mod tests {
     #[test] fn bia_places_doggy_pose_on_bed_surface() {
         let at=bia_staged_pose("doggy",[10.5,64.0,9.5],0.0);
         assert!((at[0]-10.5).abs()<1e-6);
-        assert!((at[1]-64.5625).abs()<1e-6);
+        assert!((at[1]-64.0).abs()<1e-6);
         assert!((at[2]-10.45).abs()<1e-6);
         let west=bia_staged_pose("doggy",[9.5,64.0,10.5],-90.0);
         assert!((west[0]-10.45).abs()<1e-6);
+    }
+    #[test] fn right_click_snapshot_releases_mutex_before_state_change() {
+        let id=927_426_163_u32;
+        let now=Instant::now();
+        bed_approaches().lock().unwrap().insert(id,BedApproach{
+            choice:"doggy",target:[0.5,64.0,0.5],yaw:0.0,
+            phase:BedPhase::Waiting,started:now,retry_at:now,
+            distance_at_retry:0.0,stalled:0,manual:false,
+        });
+        let snapshot=bia_waiting_snapshot(id);
+        assert!(matches!(snapshot.map(|s|s.phase),Some(BedPhase::Waiting)));
+        // This was a deadlock when the if-let scrutinee owned the guard.
+        assert!(bed_approaches().try_lock().is_ok());
+        bed_approaches().lock().unwrap().remove(&id);
     }
     #[test] fn bia_anal_prepares_beside_bed() {
         let at=bia_staged_pose("ana",[10.5,64.0,9.5],0.0);
