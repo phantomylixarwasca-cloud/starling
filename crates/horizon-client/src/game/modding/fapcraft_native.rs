@@ -40,13 +40,28 @@ struct Channels { rotation: Vec<Key>, position: Vec<Key>, scale: Vec<Key> }
 struct Clip { duration: f32, bones: HashMap<String, Channels> }
 struct BoxGeometry { origin: [f32; 3], size: [f32; 3], inflation: f32, pivot: Option<[f32; 3]>, rotation: [f32; 3], uv: [Option<[f32; 4]>; 6], swap_sides: bool, flip_uv: bool }
 struct Bone { name: String, pivot: [f32; 3], rotation: [f32; 3], children: Vec<usize>, cubes: Vec<BoxGeometry> }
-struct Rig { sprite: String, bones: Vec<Bone>, roots: Vec<usize>, idle: Option<Clip>, walk: Option<Clip>, run: Option<Clip>, talk: Option<Clip>, headpat: Option<Clip>, actions: HashMap<&'static str, Clip> }
+struct Rig { sprite: String, bones: Vec<Bone>, roots: Vec<usize>, nude: Option<Box<Rig>>, idle: Option<Clip>, walk: Option<Clip>, run: Option<Clip>, talk: Option<Clip>, headpat: Option<Clip>, actions: HashMap<&'static str, Clip> }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SocialAction { Talk, Headpat, Clip(&'static str) }
 #[derive(Clone, Copy)]
 struct SocialState { action: SocialAction, kind: &'static str, started: Instant, duration: f32 }
 static SOCIAL: OnceLock<Mutex<HashMap<u32, SocialState>>> = OnceLock::new();
+static BIA_UNDRESSED: OnceLock<Mutex<HashMap<u32, bool>>> = OnceLock::new();
+
+/// Preserve a wardrobe choice per live NPC. This changes the actual geometry
+/// that the GeckoLib renderer draws, not only its display label.
+pub(crate) fn toggle_bia_dress(id: u32) -> bool {
+    let mut state = BIA_UNDRESSED.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock().unwrap_or_else(|e| e.into_inner());
+    let value = !state.get(&id).copied().unwrap_or(false);
+    state.insert(id, value);
+    value
+}
+fn bia_undressed(id: u32) -> bool {
+    BIA_UNDRESSED.get().and_then(|state|
+        state.lock().ok().and_then(|m| m.get(&id).copied())).unwrap_or(false)
+}
 
 /// Companion orders mirror the five management options of the original
 /// Forge m.java / e2.java menu. Orders are runtime-only until the native
@@ -358,14 +373,14 @@ fn sample(keys: &[Key], time: f32, default: [f32; 3]) -> [f32; 3] {
     }
     keys.last().map_or(default, |k| k.value)
 }
-fn load_rig(zip: &mut zip::ZipArchive<File>, character: &Character) -> Result<Rig, String> {
+fn load_rig_variant(zip: &mut zip::ZipArchive<File>, character: &Character, geometry_path: &str) -> Result<Rig, String> {
     fn json(zip: &mut zip::ZipArchive<File>, name: &str) -> Result<Value, String> {
         let mut text = String::new();
         zip.by_name(name).map_err(|e| format!("{name}: {e}"))?
             .read_to_string(&mut text).map_err(|e| format!("{name}: {e}"))?;
         serde_json::from_str(&text).map_err(|e| format!("{name}: {e}"))
     }
-    let geometry = json(zip, &format!("assets/sexmod/{}", character.geo))?;
+    let geometry = json(zip, &format!("assets/sexmod/{geometry_path}"))?;
     let anim = json(zip, &format!("assets/sexmod/{}", character.animation))?;
     let obj = geometry.get("minecraft:geometry").and_then(Value::as_array)
         .and_then(|a| a.first()).ok_or("No minecraft:geometry in original asset")?;
@@ -433,12 +448,19 @@ fn load_rig(zip: &mut zip::ZipArchive<File>, character: &Character) -> Result<Ri
         "summon_normal","rich_normal","summon","sleep",
         "blink","jump_1","stand_up","give_coin","boost",
         "controlled_flight","angry_face","running","walk",
+        // Bia's source state machine (e0.java): conversation, costume and
+        // first/continuation clips. Retain each original animation key.
+        "talk_horny","talk_horny2","talk_response","strip",
+        "anal_prepare","anal_wait","anal_start","anal_slow","anal_fast","anal_cum",
+        "prone_doggy_intro","prone_doggy_insert","prone_doggy_soft",
+        "prone_doggy_hard1","prone_doggy_hard2","prone_doggy_hard3",
+        "prone_doggy_cum","wave_idle",
     ] {
         if let Some(found) = clip(&anim, character.alias, suffix) {
             actions.insert(suffix, found);
         }
     }
-    Ok(Rig { sprite:format!("sexmod:entity/fapcraft_native/{}", character.id),bones,roots,actions,
+    Ok(Rig { sprite:format!("sexmod:entity/fapcraft_native/{}", character.id),bones,roots,nude:None,actions,
         idle:clip(&anim, character.alias,"idle")
             .or_else(||clip(&anim, character.alias,"summon_wait"))
             .or_else(||clip(&anim, character.alias,"rich_normal")),
@@ -453,6 +475,15 @@ fn load_rig(zip: &mut zip::ZipArchive<File>, character: &Character) -> Result<Ri
         headpat:clip(&anim, character.alias,"headpat")
             .or_else(||clip(&anim, character.alias,"head_pat")),
     })
+}
+
+fn load_rig(zip: &mut zip::ZipArchive<File>, character: &Character) -> Result<Rig, String> {
+    let mut rig = load_rig_variant(zip, character, character.geo)?;
+    if character.id == "bia" {
+        rig.nude = Some(Box::new(load_rig_variant(zip, character,
+            "geo/bia/bianude.geo.json")?));
+    }
+    Ok(rig)
 }
 
 static RIGS: OnceLock<Vec<Option<Rig>>> = OnceLock::new();
@@ -572,6 +603,9 @@ impl EntityRenderer for Renderer {
             // returning Ok without geometry avoids rendering a wrong vanilla model.
             return Ok(());
         };
+        let rig = if self.0 == 2 && bia_undressed(entity.id) {
+            rig.nude.as_deref().unwrap_or(rig)
+        } else { rig };
         let speed=entity.living.map_or(0.0,|l|l.walk_animation_speed);
         let movement_clip=if speed>0.60 {rig.run.as_ref().or(rig.walk.as_ref())}
             else if speed>0.055 {rig.walk.as_ref().or(rig.run.as_ref())}
@@ -617,6 +651,14 @@ pub(super) fn install(registry: &mut dyn EntityRenderers) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bia_outfit_switches_independently_by_entity() {
+        const BIA_TEST_ENTITY: u32 = u32::MAX - 27;
+        assert!(!bia_undressed(BIA_TEST_ENTITY));
+        assert!(toggle_bia_dress(BIA_TEST_ENTITY));
+        assert!(bia_undressed(BIA_TEST_ENTITY));
+        assert!(!toggle_bia_dress(BIA_TEST_ENTITY));
+    }
     #[test]
     fn social_clips_selected_without_changing_locomotion_when_absent() {
         assert_eq!(CHARACTERS.len(),11);
