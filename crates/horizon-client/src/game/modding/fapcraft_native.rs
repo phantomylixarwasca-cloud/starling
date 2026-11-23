@@ -37,15 +37,26 @@ struct Rig { sprite: String, bones: Vec<Bone>, roots: Vec<usize>, idle: Option<C
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SocialAction { Talk, Headpat, Clip(&'static str) }
 #[derive(Clone, Copy)]
-struct SocialState { action: SocialAction, started: Instant }
+struct SocialState { action: SocialAction, started: Instant, duration: f32 }
 static SOCIAL: OnceLock<Mutex<HashMap<u32, SocialState>>> = OnceLock::new();
 
 /// Right-click interaction dispatch (called by item_actions.rs), separated
 /// from entity model rendering. Social poses automatically expire.
-pub(crate) fn trigger_social(id: u32, clip: &'static str) {
+pub(crate) fn trigger_social(id: u32, kind: &str, clip: &'static str) {
+    // Match the original clip's timing, not an arbitrary three-second effect.
+    // Long idle/facial clips have a cap to prevent trapping an NPC forever.
+    let duration = CHARACTERS.iter().position(|character| character.id == kind)
+        .and_then(|index| rigs().get(index))
+        .and_then(Option::as_ref)
+        .and_then(|rig| match clip {
+            "talk" => rig.talk.as_ref(),
+            "headpat" => rig.headpat.as_ref(),
+            other => rig.actions.get(other),
+        })
+        .map_or(2.0, |clip| clip.duration.clamp(0.25, 12.0));
     let actions = SOCIAL.get_or_init(|| Mutex::new(HashMap::new()));
     let mut actions = actions.lock().unwrap_or_else(|p| p.into_inner());
-    actions.retain(|_, state| state.started.elapsed().as_secs_f32() < 6.0);
+    actions.retain(|_, state| state.started.elapsed().as_secs_f32() < state.duration);
     actions.insert(id, SocialState {
         action: match clip {
             "talk" => SocialAction::Talk,
@@ -53,6 +64,7 @@ pub(crate) fn trigger_social(id: u32, clip: &'static str) {
             other => SocialAction::Clip(other),
         },
         started: Instant::now(),
+        duration,
     });
 }
 /// The integrated world server pauses a character's wandering AI only while
@@ -65,7 +77,7 @@ fn social_pose(id: u32) -> Option<(SocialAction, f32)> {
     let actions = SOCIAL.get()?.lock().unwrap_or_else(|p| p.into_inner());
     let state = actions.get(&id)?;
     let time = state.started.elapsed().as_secs_f32();
-    (time < 5.0).then_some((state.action, time))
+    (time < state.duration).then_some((state.action, time))
 }
 
 /// GeckoLib does not render every bone present in the .geo.json. The original
@@ -423,11 +435,11 @@ mod tests {
     fn social_clips_selected_without_changing_locomotion_when_absent() {
         assert_eq!(CHARACTERS.len(),11);
         assert!(social_pose(u32::MAX).is_none());
-        trigger_social(u32::MAX, "talk");
+        trigger_social(u32::MAX, "jenny", "talk");
         assert_eq!(social_pose(u32::MAX).map(|x|x.0),Some(SocialAction::Talk));
-        trigger_social(u32::MAX, "headpat");
+        trigger_social(u32::MAX, "bia", "headpat");
         assert_eq!(social_pose(u32::MAX).map(|x|x.0),Some(SocialAction::Headpat));
-        trigger_social(u32::MAX, "wave");
+        trigger_social(u32::MAX, "jenny", "wave");
         assert_eq!(social_pose(u32::MAX).map(|x|x.0),Some(SocialAction::Clip("wave")));
     }
     #[test]
