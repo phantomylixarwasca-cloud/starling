@@ -27,7 +27,14 @@ const CHARACTERS: [Character; 11] = [
 #[derive(Clone, Copy, Debug)]
 struct Key { time: f32, value: [f32; 3], easing: Easing }
 #[derive(Clone, Copy, Debug)]
-enum Easing { Linear, SineIn, SineOut, SineBoth, QuadIn, QuadOut, QuadBoth }
+enum Easing {
+    Linear, Step,
+    SineIn, SineOut, SineBoth, QuadIn, QuadOut, QuadBoth,
+    CubicIn, CubicOut, CubicBoth, QuartIn, QuartOut, QuartBoth,
+    QuintIn, QuintOut, QuintBoth, BackIn, BackOut, BackBoth,
+    ElasticIn, ElasticOut, ElasticBoth, ExpoIn, ExpoOut, ExpoBoth,
+    CircIn, CircOut, BounceIn,
+}
 #[derive(Default)]
 struct Channels { rotation: Vec<Key>, position: Vec<Key>, scale: Vec<Key> }
 struct Clip { duration: f32, bones: HashMap<String, Channels> }
@@ -222,9 +229,25 @@ fn parse_track(value: Option<&Value>) -> Vec<Key> {
     fn key(time: f32, raw: &Value) -> Option<Key> {
         let vec = if raw.is_array() { raw } else { raw.get("vector")? };
         let easing = match raw.get("easing").and_then(Value::as_str).unwrap_or("linear") {
+            "step" => Easing::Step,
             "easeInSine" => Easing::SineIn, "easeOutSine" => Easing::SineOut,
-            "easeInOutSine" => Easing::SineBoth, "easeInQuad" => Easing::QuadIn,
-            "easeOutQuad" => Easing::QuadOut, "easeInOutQuad" => Easing::QuadBoth,
+            "easeInOutSine" => Easing::SineBoth,
+            "easeInQuad" => Easing::QuadIn, "easeOutQuad" => Easing::QuadOut,
+            "easeInOutQuad" => Easing::QuadBoth,
+            "easeInCubic" => Easing::CubicIn, "easeOutCubic" => Easing::CubicOut,
+            "easeInOutCubic" => Easing::CubicBoth,
+            "easeInQuart" => Easing::QuartIn, "easeOutQuart" => Easing::QuartOut,
+            "easeInOutQuart" => Easing::QuartBoth,
+            "easeInQuint" => Easing::QuintIn, "easeOutQuint" => Easing::QuintOut,
+            "easeInOutQuint" => Easing::QuintBoth,
+            "easeInBack" => Easing::BackIn, "easeOutBack" => Easing::BackOut,
+            "easeInOutBack" => Easing::BackBoth,
+            "easeInElastic" => Easing::ElasticIn, "easeOutElastic" => Easing::ElasticOut,
+            "easeInOutElastic" => Easing::ElasticBoth,
+            "easeInExpo" => Easing::ExpoIn, "easeOutExpo" => Easing::ExpoOut,
+            "easeInOutExpo" => Easing::ExpoBoth,
+            "easeInCirc" => Easing::CircIn, "easeOutCirc" => Easing::CircOut,
+            "easeInBounce" => Easing::BounceIn,
             _ => Easing::Linear,
         };
         Some(Key { time, value: triplet(Some(vec), [0.0; 3]), easing })
@@ -257,15 +280,70 @@ fn clip(source: &Value, alias: &str, suffix: &str) -> Option<Clip> {
     }
     Some(Clip { duration: duration.max(0.001), bones })
 }
+/// GeckoLib EasingType definitions as used by the original Bedrock
+/// animations. In particular, the headpat and hug clips need Back, Quart
+/// and Elastic keyframes; treating those as linear distorts their timing.
+fn bounce_out(x:f32)->f32 {
+    let n=7.5625_f32;
+    let d=2.75_f32;
+    if x < 1.0/d { n*x*x }
+    else if x < 2.0/d { let t=x-1.5/d; n*t*t+0.75 }
+    else if x < 2.5/d { let t=x-2.25/d; n*t*t+0.9375 }
+    else { let t=x-2.625/d; n*t*t+0.984375 }
+}
 fn ease(a: Easing, x: f32) -> f32 {
+    use std::f32::consts::{PI,FRAC_PI_2,TAU};
+    let t=x.clamp(0.0,1.0);
+    let c1=1.70158_f32;
+    let c2=c1*1.525;
+    let c3=c1+1.0;
+    let c4=TAU/3.0;
+    let c5=TAU/4.5;
     match a {
-        Easing::Linear => x,
-        Easing::SineIn => 1.0 - (x * std::f32::consts::FRAC_PI_2).cos(),
-        Easing::SineOut => (x * std::f32::consts::FRAC_PI_2).sin(),
-        Easing::SineBoth => -(std::f32::consts::PI * x).cos().mul_add(0.5, -0.5),
-        Easing::QuadIn => x * x,
-        Easing::QuadOut => x * (2.0 - x),
-        Easing::QuadBoth => if x < 0.5 { 2.0*x*x } else { 1.0 - (-2.0*x+2.0).powi(2)*0.5 },
+        Easing::Linear => t,
+        Easing::Step => if t>=1.0 {1.0} else {0.0},
+        Easing::SineIn => 1.0 - (t*FRAC_PI_2).cos(),
+        Easing::SineOut => (t*FRAC_PI_2).sin(),
+        Easing::SineBoth => -(PI*t).cos().mul_add(0.5,-0.5),
+        Easing::QuadIn => t*t,
+        Easing::QuadOut => 1.0-(1.0-t).powi(2),
+        Easing::QuadBoth => if t<0.5 {2.0*t*t} else {1.0-(-2.0*t+2.0).powi(2)*0.5},
+        Easing::CubicIn => t.powi(3),
+        Easing::CubicOut => 1.0-(1.0-t).powi(3),
+        Easing::CubicBoth => if t<0.5 {4.0*t.powi(3)} else {1.0-(-2.0*t+2.0).powi(3)*0.5},
+        Easing::QuartIn => t.powi(4),
+        Easing::QuartOut => 1.0-(1.0-t).powi(4),
+        Easing::QuartBoth => if t<0.5 {8.0*t.powi(4)} else {1.0-(-2.0*t+2.0).powi(4)*0.5},
+        Easing::QuintIn => t.powi(5),
+        Easing::QuintOut => 1.0-(1.0-t).powi(5),
+        Easing::QuintBoth => if t<0.5 {16.0*t.powi(5)} else {1.0-(-2.0*t+2.0).powi(5)*0.5},
+        Easing::BackIn => c3*t.powi(3)-c1*t.powi(2),
+        Easing::BackOut => 1.0+c3*(t-1.0).powi(3)+c1*(t-1.0).powi(2),
+        Easing::BackBoth => if t<0.5 {
+            let z=2.0*t;
+            z*z*((c2+1.0)*z-c2)*0.5
+        } else {
+            let z=2.0*t-2.0;
+            (z*z*((c2+1.0)*z+c2)+2.0)*0.5
+        },
+        Easing::ElasticIn => if t==0.0 || t==1.0 {t}
+            else { -(2.0_f32.powf(10.0*t-10.0)*( (10.0*t-10.75)*c4 ).sin()) },
+        Easing::ElasticOut => if t==0.0 || t==1.0 {t}
+            else {2.0_f32.powf(-10.0*t)*((10.0*t-0.75)*c4).sin()+1.0},
+        Easing::ElasticBoth => if t==0.0 || t==1.0 {t}
+            else if t<0.5 {
+                -(2.0_f32.powf(20.0*t-10.0)*((20.0*t-11.125)*c5).sin())*0.5
+            } else {
+                (2.0_f32.powf(-20.0*t+10.0)*((20.0*t-11.125)*c5).sin())*0.5+1.0
+            },
+        Easing::ExpoIn => if t==0.0 {0.0} else {2.0_f32.powf(10.0*t-10.0)},
+        Easing::ExpoOut => if t==1.0 {1.0} else {1.0-2.0_f32.powf(-10.0*t)},
+        Easing::ExpoBoth => if t==0.0 || t==1.0 {t}
+            else if t<0.5 {2.0_f32.powf(20.0*t-10.0)*0.5}
+            else {(2.0-2.0_f32.powf(-20.0*t+10.0))*0.5},
+        Easing::CircIn => 1.0-(1.0-t*t).sqrt(),
+        Easing::CircOut => (1.0-(t-1.0).powi(2)).sqrt(),
+        Easing::BounceIn => 1.0-bounce_out(1.0-t),
     }
 }
 fn sample(keys: &[Key], time: f32, default: [f32; 3]) -> [f32; 3] {
