@@ -5,6 +5,7 @@
 //! Locomotion uses LivingRenderState. Original Java game logic and its interaction
 //! state machine have *not* been ported; this is the actual renderer bridge.
 use mod_api::{BlockEntityDrawContext, EntityRenderState, EntityRenderer, EntityRenderers};
+use horizon_client::mobs::anim::BodyPose;
 use serde_json::Value;
 use std::{collections::HashMap, fs::File, io::Read, path::PathBuf, sync::{Arc, Mutex, OnceLock}, time::Instant};
 
@@ -121,6 +122,47 @@ pub(crate) fn paired_action_active() -> bool {
                 SocialAction::Clip("head_pat") |
                 SocialAction::Clip("hug"))
     })
+}
+/// Simple player-half counterpart for non-explicit contact gestures. It
+/// animates the *real player model* (including their actual skin) instead of
+/// revealing the hidden, wrongly textured Steve bone inside an NPC rig.
+#[derive(Debug)]
+pub(crate) struct FapcraftPlayerPose;
+impl BodyPose for FapcraftPlayerPose {
+    fn pose(&self, _age:f32, _at_rest:&[[f32;9];6], poses:&mut [[f32;9];6]) -> bool {
+        let Some(active) = SOCIAL.get() else { return false };
+        let guard = active.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(state) = guard.values()
+            .filter(|s| s.started.elapsed().as_secs_f32() < s.duration)
+            .filter(|s| matches!(s.action, SocialAction::Headpat
+                | SocialAction::Clip("head_pat") | SocialAction::Clip("hug")))
+            .max_by_key(|s| s.started)
+        else { return false };
+        let time=state.started.elapsed().as_secs_f32();
+        let phase=(time/state.duration.max(0.001)).clamp(0.0,1.0);
+        let ease_in=(phase*8.0).min(1.0);
+        let ease_out=((1.0-phase)*8.0).min(1.0);
+        let blend=ease_in*ease_out;
+        match state.action {
+            SocialAction::Clip("hug") => {
+                // Both forearms reach toward the character.
+                poses[2][3] = -1.20 * blend;
+                poses[2][4] = -0.18 * blend;
+                poses[2][5] = 0.22 * blend;
+                poses[3][3] = -1.20 * blend;
+                poses[3][4] = 0.18 * blend;
+                poses[3][5] = -0.22 * blend;
+            }
+            _ => {
+                // A gentle, repeated right-arm pat, not just one attack swing.
+                let stroke = (time * std::f32::consts::TAU * 1.7).sin() * 0.13;
+                poses[2][3] = (-1.27 + stroke) * blend;
+                poses[2][5] = -0.13 * blend;
+                poses[3][3] = -0.12 * blend;
+            }
+        }
+        true
+    }
 }
 fn social_pose(id: u32) -> Option<(SocialAction, f32)> {
     let actions = SOCIAL.get()?.lock().unwrap_or_else(|p| p.into_inner());
