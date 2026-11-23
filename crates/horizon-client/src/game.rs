@@ -2661,7 +2661,7 @@ impl Game<'_> {
             return;
         };
         player.nudge = nudge;
-        player.mobility_restricted = blind;
+        player.mobility_restricted = blind || fapcraft_native::paired_action_active();
         player.yaw = self.yaw;
         player.pitch = self.pitch;
         player.auto_jump_enabled = self.settings.auto_jump;
