@@ -262,6 +262,16 @@ fn button_rect(x:f32,y:f32,w:f32,i:usize)->(f32,f32,f32,f32) {
 }
 
 impl Game<'_> {
+    /// Play only real, registered audio cues from GeckoLib's timeline.
+    /// The 0.5.2 resource pack contains the original Bia and related effect
+    /// sound events. Game's client audio queue owns their lifetimes.
+    pub(in crate::game) fn fapcraft_bia_play_sound_events(&self) {
+        if !self.native_window() {return}
+        for event in super::fapcraft_native::take_bia_sound_events() {
+            self.mod_sounds.queue(&mod_api::SoundPlay::ui(&event),0);
+        }
+    }
+
     /// Tick the original two-stage interaction: navigate, prepare, wait for
     /// proximity. Shift is read from the game's existing sneak-key state.
     /// A portable version of e0.java's navigation/prepare/wait/transition
