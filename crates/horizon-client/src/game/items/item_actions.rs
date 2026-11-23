@@ -181,7 +181,27 @@ impl Game<'_> {
     /// Fapcraft's original m.java presents an action GUI after right-click.
     /// Open the native Android-compatible menu instead of immediately playing
     /// a fixed animation. Only supported actions are enabled.
-    fn fapcraft_social_on_click(&mut self, id: i32, kind: &str) -> bool {
+    /// Open the built-in menu on the visible client *before* the local
+    /// singleplayer server sends its default villager interaction response.
+    /// Mouse and touch use the same use-button pipeline on Android.
+    pub(super) fn fapcraft_try_open_targeted_menu(&mut self) -> bool {
+        if self.screen != super::Screen::Playing
+            || self.renderer.is_none()
+            || self.player.is_none()
+        {
+            return false;
+        }
+        let Some((_, Some(id))) = self.pick_entity_hit_at() else {
+            return false;
+        };
+        let Some(entity) = self.level_entity(id) else {
+            return false;
+        };
+        let kind = self.target_type(entity);
+        self.fapcraft_social_on_click(id, &kind)
+    }
+
+    pub(super) fn fapcraft_social_on_click(&mut self, id: i32, kind: &str) -> bool {
         let Some(name) = kind.strip_prefix("sexmod:") else { return false; };
         if !matches!(name,
             "jenny" | "ellie" | "slime" | "bia" | "bee" | "luna" |
