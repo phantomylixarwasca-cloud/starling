@@ -32,22 +32,26 @@ struct Channels { rotation: Vec<Key>, position: Vec<Key>, scale: Vec<Key> }
 struct Clip { duration: f32, bones: HashMap<String, Channels> }
 struct BoxGeometry { origin: [f32; 3], size: [f32; 3], inflation: f32, pivot: Option<[f32; 3]>, rotation: [f32; 3], uv: [Option<[f32; 4]>; 6], swap_sides: bool, flip_uv: bool }
 struct Bone { name: String, pivot: [f32; 3], rotation: [f32; 3], children: Vec<usize>, cubes: Vec<BoxGeometry> }
-struct Rig { sprite: String, bones: Vec<Bone>, roots: Vec<usize>, idle: Option<Clip>, walk: Option<Clip>, run: Option<Clip>, talk: Option<Clip>, headpat: Option<Clip> }
+struct Rig { sprite: String, bones: Vec<Bone>, roots: Vec<usize>, idle: Option<Clip>, walk: Option<Clip>, run: Option<Clip>, talk: Option<Clip>, headpat: Option<Clip>, actions: HashMap<&'static str, Clip> }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SocialAction { Talk, Headpat }
+enum SocialAction { Talk, Headpat, Clip(&'static str) }
 #[derive(Clone, Copy)]
 struct SocialState { action: SocialAction, started: Instant }
 static SOCIAL: OnceLock<Mutex<HashMap<u32, SocialState>>> = OnceLock::new();
 
 /// Right-click interaction dispatch (called by item_actions.rs), separated
 /// from entity model rendering. Social poses automatically expire.
-pub(crate) fn trigger_social(id: u32, headpat: bool) {
+pub(crate) fn trigger_social(id: u32, clip: &'static str) {
     let actions = SOCIAL.get_or_init(|| Mutex::new(HashMap::new()));
     let mut actions = actions.lock().unwrap_or_else(|p| p.into_inner());
-    actions.retain(|_, state| state.started.elapsed().as_secs_f32() < 4.0);
+    actions.retain(|_, state| state.started.elapsed().as_secs_f32() < 6.0);
     actions.insert(id, SocialState {
-        action: if headpat { SocialAction::Headpat } else { SocialAction::Talk },
+        action: match clip {
+            "talk" => SocialAction::Talk,
+            "headpat" => SocialAction::Headpat,
+            other => SocialAction::Clip(other),
+        },
         started: Instant::now(),
     });
 }
@@ -55,7 +59,7 @@ fn social_pose(id: u32) -> Option<(SocialAction, f32)> {
     let actions = SOCIAL.get()?.lock().unwrap_or_else(|p| p.into_inner());
     let state = actions.get(&id)?;
     let time = state.started.elapsed().as_secs_f32();
-    (time < 3.0).then_some((state.action, time))
+    (time < 5.0).then_some((state.action, time))
 }
 
 /// GeckoLib does not render every bone present in the .geo.json. The original
@@ -214,7 +218,23 @@ fn load_rig(zip: &mut zip::ZipArchive<File>, character: &Character) -> Result<Ri
             bones[p].children.push(i);
         } else {roots.push(i);}
     }
-    Ok(Rig { sprite:format!("sexmod:entity/fapcraft_native/{}", character.id),bones,roots,
+    // Only named non-explicit clips offered by the character-specific UI are loaded.
+    // These are read from each original .animation.json, not synthesized poses.
+    let mut actions = HashMap::new();
+    for suffix in [
+        "wave","fhappy","payment","sit","fortnite",
+        "hug","sitdown","sitdownidle","hugidle",
+        "headpat","talk_idle2","jumpstart","jumpend",
+        "attack0","head_pat","start_fishing","sitting_intro",
+        "summon_normal","rich_normal","summon","sleep",
+        "blink","jump_1","stand_up","give_coin","boost",
+        "controlled_flight","angry_face","running","walk",
+    ] {
+        if let Some(found) = clip(&anim, character.alias, suffix) {
+            actions.insert(suffix, found);
+        }
+    }
+    Ok(Rig { sprite:format!("sexmod:entity/fapcraft_native/{}", character.id),bones,roots,actions,
         idle:clip(&anim, character.alias,"idle")
             .or_else(||clip(&anim, character.alias,"summon_wait"))
             .or_else(||clip(&anim, character.alias,"rich_normal")),
@@ -356,8 +376,9 @@ impl EntityRenderer for Renderer {
             let clip=match action {
                 SocialAction::Talk=>rig.talk.as_ref(),
                 SocialAction::Headpat=>rig.headpat.as_ref(),
+                SocialAction::Clip(name)=>rig.actions.get(name),
             }?;
-            Some((clip,seconds.rem_euclid(clip.duration)))
+            Some((clip, seconds.min(clip.duration)))
         });
         let (clip,time)=match social {
             Some((clip,time))=>(Some(clip),time),
@@ -396,10 +417,12 @@ mod tests {
     fn social_clips_selected_without_changing_locomotion_when_absent() {
         assert_eq!(CHARACTERS.len(),11);
         assert!(social_pose(u32::MAX).is_none());
-        trigger_social(u32::MAX, false);
+        trigger_social(u32::MAX, "talk");
         assert_eq!(social_pose(u32::MAX).map(|x|x.0),Some(SocialAction::Talk));
-        trigger_social(u32::MAX, true);
+        trigger_social(u32::MAX, "headpat");
         assert_eq!(social_pose(u32::MAX).map(|x|x.0),Some(SocialAction::Headpat));
+        trigger_social(u32::MAX, "wave");
+        assert_eq!(social_pose(u32::MAX).map(|x|x.0),Some(SocialAction::Clip("wave")));
     }
     #[test]
     fn fapcraft_north_south_facing_regression() {
