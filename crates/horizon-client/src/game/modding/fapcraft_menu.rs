@@ -10,7 +10,7 @@ use horizon_client::{
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Page { Actions, Dialogue, Response }
+enum Page { Actions, Dialogue, Response, Companion }
 
 #[derive(Clone, Copy, Debug)]
 struct Menu {
@@ -128,13 +128,28 @@ fn character_actions(kind: &str) -> &'static [CharacterAction] {
         _ => &[],
     }
 }
-fn labels(kind:&str, page:Page) -> Vec<(&'static str,bool)> {
+fn labels(kind:&str, entity:i32, page:Page) -> Vec<(&'static str,bool)> {
     match page {
         Page::Actions => {
             let mut out=vec![("Hablar...",true)];
             out.extend(character_actions(kind).iter().map(|a|(a.label,true)));
+            out.push(("Seguir / Casa",true));
             out.push(("Cerrar",true));
             out
+        },
+        Page::Companion => {
+            use super::fapcraft_native::{CompanionMode, companion_order};
+            let following = u32::try_from(entity).ok()
+                .and_then(companion_order)
+                .is_some_and(|o| o.mode==CompanionMode::Follow);
+            vec![
+                (if following {"Dejar de seguirme"} else {"Seguirme"},true),
+                ("Ir a casa",true),
+                ("Establecer casa aquí",true),
+                ("Equipo (pendiente)",false),
+                ("Volver",true),
+                ("Cerrar",true),
+            ]
         },
         Page::Dialogue=>vec![
             ("¿Cómo estás?",true),
@@ -150,9 +165,9 @@ fn labels(kind:&str, page:Page) -> Vec<(&'static str,bool)> {
         ],
     }
 }
-fn panel(w:f32,h:f32,kind:&str,page:Page)->(f32,f32,f32,f32) {
+fn panel(w:f32,h:f32,kind:&str,entity:i32,page:Page)->(f32,f32,f32,f32) {
     let width=(w-14.0).min(260.0).max(130.0);
-    let rows=labels(kind,page).len() as f32;
+    let rows=labels(kind,entity,page).len() as f32;
     let height=(68.0 + rows*24.0).min(h-8.0).max(100.0);
     ((w-width)*0.5,(h-height)*0.5,width,height)
 }
@@ -210,7 +225,7 @@ impl Game<'_> {
         let Some(menu)=*state().lock().unwrap_or_else(|e|e.into_inner()) else {return;};
         let atlas=&self.gui.atlas;
         let (w,h)=(batch.width,batch.height);
-        let (x,y,bw,bh)=panel(w,h,menu.kind,menu.page);
+        let (x,y,bw,bh)=panel(w,h,menu.kind,menu.entity,menu.page);
         batch.fill(atlas,0.0,0.0,w,h,rgba(0,0,0,145));
         batch.fill(atlas,x-2.0,y-2.0,bw+4.0,bh+4.0,rgba(185,155,100,255));
         batch.fill(atlas,x,y,bw,bh,rgba(22,27,34,245));
@@ -219,7 +234,7 @@ impl Game<'_> {
         if menu.page==Page::Response {
             batch.text(atlas,menu.response,x+12.0,y+29.0,rgba(255,222,155,255),true);
         }
-        for (i,&(label,enabled)) in labels(menu.kind,menu.page).iter().enumerate() {
+        for (i,&(label,enabled)) in labels(menu.kind,menu.entity,menu.page).iter().enumerate() {
             let (bx,by,ww,hh)=button_rect(x,y,bw,i);
             if by+hh>y+bh {break;}
             let hovered=enabled&&ui::hovered(self.cursor,bx,by,ww,hh);
@@ -230,8 +245,8 @@ impl Game<'_> {
     pub(super) fn fapcraft_interaction_click(&mut self) {
         let Some(mut menu)=*state().lock().unwrap_or_else(|e|e.into_inner()) else {return;};
         let (w,h)=self.gui_size();
-        let (x,y,bw,bh)=panel(w,h,menu.kind,menu.page);
-        let selected=labels(menu.kind,menu.page).iter().enumerate()
+        let (x,y,bw,bh)=panel(w,h,menu.kind,menu.entity,menu.page);
+        let selected=labels(menu.kind,menu.entity,menu.page).iter().enumerate()
             .find(|(i,(_,enabled))|{
                 let (bx,by,ww,hh)=button_rect(x,y,bw,*i);
                 *enabled&&by+hh<=y+bh&&ui::hovered(self.cursor,bx,by,ww,hh)
@@ -271,7 +286,44 @@ impl Game<'_> {
                 voice=true;
                 close=true;
             },
-            (Page::Actions,index) if index==character_actions(menu.kind).len()+1=>close=true,
+            (Page::Actions,index) if index==character_actions(menu.kind).len()+1=>{
+                menu.page=Page::Companion;
+            },
+            (Page::Actions,index) if index==character_actions(menu.kind).len()+2=>close=true,
+            (Page::Companion,0..=2)=>{
+                use super::fapcraft_native::{CompanionMode,companion_order,set_companion_mode,set_companion_home};
+                if let Ok(id)=u32::try_from(menu.entity) {
+                    let at=self.level_entity(menu.entity).and_then(|target|self.target_position(target));
+                    if let Some(at)=at {
+                        match i {
+                            0 => {
+                                let following=companion_order(id)
+                                    .is_some_and(|o|o.mode==CompanionMode::Follow);
+                                set_companion_mode(id,if following {CompanionMode::Stay}
+                                    else {CompanionMode::Follow},at);
+                                self.send_overlay_message(Text::literal(
+                                    if following {"Fapcraft: esperando aquí"} else {"Fapcraft: siguiéndote"},
+                                ));
+                            },
+                            1 => {
+                                if companion_order(id).is_some() {
+                                    set_companion_mode(id,CompanionMode::ReturnHome,at);
+                                    self.send_overlay_message(Text::literal("Fapcraft: volviendo a casa"));
+                                } else {
+                                    self.send_overlay_message(Text::literal("Primero establece una casa"));
+                                }
+                            },
+                            2 => {
+                                set_companion_home(id,at);
+                                self.send_overlay_message(Text::literal("Fapcraft: casa establecida"));
+                            },
+                            _ => {}
+                        }
+                    }
+                }
+            },
+            (Page::Companion,4)=>menu.page=Page::Actions,
+            (Page::Companion,5)=>close=true,
             (Page::Dialogue,0..=2)=>{
                 menu.response=response(menu.kind,i);
                 social=Some("talk");voice=true;close=true;
@@ -317,14 +369,15 @@ impl Game<'_> {
 mod tests {
     use super::*;
     #[test] fn menu_has_no_fake_functional_buttons() {
-        assert_eq!(labels("jenny",Page::Actions).len(),6);
-        assert_eq!(labels("bee",Page::Actions).len(),3);
+        assert_eq!(labels("jenny",0,Page::Actions).len(),7);
+        assert_eq!(labels("bee",0,Page::Actions).len(),4);
         assert_eq!(character_actions("bia")[0].clip,"headpat");
         assert_eq!(character_actions("ellie")[0].clip,"hug");
-        assert_eq!(labels("jenny",Page::Dialogue).len(),5);
+        assert_eq!(labels("jenny",0,Page::Dialogue).len(),5);
+        assert!(!labels("jenny",0,Page::Companion)[3].1);
         assert_eq!(name("bia"),"Bia");
         assert_eq!(response("bia",0),"Heyaaa~");
-        let (_,_,w,h)=panel(480.0,320.0,"jenny",Page::Actions);
+        let (_,_,w,h)=panel(480.0,320.0,"jenny",0,Page::Actions);
         assert!(w<=480.0&&h<=320.0);
     }
 }
