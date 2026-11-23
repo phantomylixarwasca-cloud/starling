@@ -73,6 +73,20 @@ pub(crate) fn trigger_social(id: u32, kind: &str, clip: &'static str) {
 pub(crate) fn social_active(id: u32) -> bool {
     social_pose(id).is_some()
 }
+/// Contact interactions temporarily stop player walking, as the original
+/// two-actor controller does. The ordinary player movement loop restores its
+/// previous movement rules as soon as the animation finishes.
+pub(crate) fn paired_action_active() -> bool {
+    let Some(active) = SOCIAL.get() else { return false; };
+    let active = active.lock().unwrap_or_else(|p| p.into_inner());
+    active.values().any(|state| {
+        state.started.elapsed().as_secs_f32() < state.duration
+            && matches!(state.action,
+                SocialAction::Headpat |
+                SocialAction::Clip("head_pat") |
+                SocialAction::Clip("hug"))
+    })
+}
 fn social_pose(id: u32) -> Option<(SocialAction, f32)> {
     let actions = SOCIAL.get()?.lock().unwrap_or_else(|p| p.into_inner());
     let state = actions.get(&id)?;
