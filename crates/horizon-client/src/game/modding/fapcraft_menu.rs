@@ -245,6 +245,24 @@ impl Game<'_> {
             (Page::Actions,0)=>{menu.page=Page::Dialogue;},
             (Page::Actions,index) if index >= 1 && index <= character_actions(menu.kind).len() => {
                 let action=character_actions(menu.kind)[index-1];
+                // Contact requires reach, not a remote animation while the
+                // player is still several blocks from the character.
+                if matches!(action.clip,"headpat"|"head_pat"|"hug") {
+                    let player=self.player.as_ref().map(|p|p.position);
+                    let target=self.level_entity(menu.entity)
+                        .and_then(|entity|self.target_position(entity));
+                    if let (Some(player),Some(target))=(player,target) {
+                        let d=((player.x-target[0]).powi(2)
+                            +(player.y-target[1]).powi(2)
+                            +(player.z-target[2]).powi(2)).sqrt();
+                        if d>2.25 {
+                            self.send_overlay_message(Text::literal(
+                                "Acércate al personaje para interactuar",
+                            ));
+                            return;
+                        }
+                    }
+                }
                 menu.response=action.response;
                 // Forge's original m.java closes the menu when an action is
                 // chosen. Return to world view so the player can see and
