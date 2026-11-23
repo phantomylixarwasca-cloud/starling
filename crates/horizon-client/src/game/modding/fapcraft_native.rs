@@ -580,10 +580,39 @@ fn bedrock_uv(u: f32, v: f32, du: f32, dv: f32, width: f32, height: f32) -> Opti
           (u + du) * 16.0 / width, (v + dv) * 16.0 / height])
 }
 
+/// Bedrock/GeckoLib allows tiny Molang-style numeric expressions in
+/// vector components. The source contains e.g. "22.42-8", "2.7-8" and
+/// "-97.0283+easeInOutSine". serde_json::Value::as_f64 returns None for
+/// these strings; defaulting them to zero separated the paired rig (Ana).
+/// Evaluate only finite sums/differences of literals; an optional +ease...
+/// marker is animation metadata, NOT an arithmetic term or executable code.
+fn bedrock_number(value:&Value, fallback:f32)->f32 {
+    if let Some(n)=value.as_f64() {
+        return if n.is_finite(){n as f32}else{fallback}
+    }
+    let Some(raw)=value.as_str() else {return fallback};
+    let expr=raw.split("+ease").next().unwrap_or(raw).trim();
+    if let Ok(n)=expr.parse::<f32>() {
+        return if n.is_finite(){n}else{fallback}
+    }
+    let bytes=expr.as_bytes();
+    let mut total=0.0_f32;
+    let mut start=0usize;
+    for i in 1..=bytes.len() {
+        let boundary=i==bytes.len() || bytes[i]==b'+' || bytes[i]==b'-';
+        if !boundary {continue}
+        let part=expr[start..i].trim();
+        let Ok(value)=part.parse::<f32>() else {return fallback};
+        if !value.is_finite(){return fallback}
+        total+=value;
+        start=i;
+    }
+    if total.is_finite(){total}else{fallback}
+}
 fn triplet(v: Option<&Value>, default: [f32; 3]) -> [f32; 3] {
     let Some(array) = v.and_then(Value::as_array) else { return default };
     if array.len() < 3 { return default; }
-    std::array::from_fn(|i| array[i].as_f64().unwrap_or(default[i] as f64) as f32)
+    std::array::from_fn(|i|bedrock_number(&array[i],default[i]))
 }
 fn parse_track(value: Option<&Value>) -> Vec<Key> {
     let Some(value) = value else { return Vec::new() };
@@ -1059,6 +1088,14 @@ pub(super) fn install(registry: &mut dyn EntityRenderers) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn original_bia_molang_expressions_are_not_zeroed() {
+        assert!((bedrock_number(&serde_json::json!("22.42-8"),0.0)-14.42).abs()<0.0001);
+        assert!((bedrock_number(&serde_json::json!("2.7-8"),0.0)+5.3).abs()<0.0001);
+        assert!((bedrock_number(&serde_json::json!("-15.7+5.12"),0.0)+10.58).abs()<0.0001);
+        assert!((bedrock_number(&serde_json::json!("-97.0283+easeInOutSine"),0.0)+97.0283).abs()<0.0001);
+        assert_eq!(bedrock_number(&serde_json::json!("invalid"),42.0),42.0);
+    }
     #[test]
     fn bia_voices_follow_original_keyframe_categories() {
         assert_eq!(bia_audio_categories("sitdownMSG1"),&[("girls.bia.breath",4)]);
