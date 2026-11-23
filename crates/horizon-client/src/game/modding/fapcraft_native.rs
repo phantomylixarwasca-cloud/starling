@@ -64,7 +64,8 @@ const BIA_DOGGY: &[&str] = &[
     "prone_doggy_cum",
 ];
 const BIA_ANA: &[&str] = &[
-    "anal_prepare", "anal_wait", "anal_start", "anal_slow", "anal_fast", "anal_cum",
+    // The bed phase already played anal_prepare, then held anal_wait.
+    "anal_start", "anal_slow", "anal_fast", "anal_cum",
 ];
 static SOCIAL: OnceLock<Mutex<HashMap<u32, SocialState>>> = OnceLock::new();
 static BIA_UNDRESSED: OnceLock<Mutex<HashMap<u32, bool>>> = OnceLock::new();
@@ -797,7 +798,7 @@ mod tests {
     fn bia_original_sequences_have_mapped_start_and_end() {
         assert_eq!(BIA_DOGGY.first().copied(), Some("prone_doggy_intro"));
         assert_eq!(BIA_DOGGY.last().copied(), Some("prone_doggy_cum"));
-        assert_eq!(BIA_ANA.first().copied(), Some("anal_prepare"));
+        assert_eq!(BIA_ANA.first().copied(), Some("anal_start"));
         assert_eq!(BIA_ANA.last().copied(), Some("anal_cum"));
         assert!(!trigger_bia_sequence(17, "other"));
     }
