@@ -66,6 +66,18 @@ fn bia_waiting_snapshot(id:u32) -> Option<BedApproach> {
     guard.get(&id).copied()
 }
 
+/// The GeckoLib skeleton is offset from the entity anchor. Compare the
+/// player's feet to both positions, not the camera and bone transforms.
+fn bia_player_is_near(player:[f64;3],body:[f64;3],anchor:[f64;3])->bool {
+    let horizontal=|at:[f64;3]| {
+        let dx=player[0]-at[0];
+        let dz=player[2]-at[2];
+        (dx*dx+dz*dz).sqrt()
+    };
+    horizontal(body).min(horizontal(anchor))<=2.8
+        && (player[1]-body[1]).abs().min((player[1]-anchor[1]).abs())<=2.0
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page { Actions, Dialogue, Response, Companion }
 
@@ -386,28 +398,9 @@ impl Game<'_> {
                         state.phase=BedPhase::Waiting;
                     }
                 }
-                BedPhase::Waiting => {
-                    if let Some(player)=self.player.as_ref().map(|p|p.position) {
-                        // The visible animation body is offset from the entity
-                        // anchor and the player collision box. Check horizontal
-                        // reach to both the staged body and walking target.
-                        let near_body=((at.x-player.x).powi(2)
-                            +(at.z-player.z).powi(2)).sqrt();
-                        let near_anchor=((waiting.target[0]-player.x).powi(2)
-                            +(waiting.target[2]-player.z).powi(2)).sqrt();
-                        let level=(at.y-player.y).abs()
-                            .min((waiting.target[1]-player.y).abs());
-                        if near_body.min(near_anchor)<=2.8 && level<=2.0 {
-                            let now=Instant::now();
-                            *bia_screen_fade().lock().unwrap_or_else(|e|e.into_inner())
-                                = Some(now);
-                            if let Some(state)=bed_approaches().lock()
-                                .unwrap_or_else(|e|e.into_inner()).get_mut(&id) {
-                                state.phase=BedPhase::Fading(now);
-                            }
-                        }
-                    }
-                }
+                // Check separately with fresh client and integrated Guest
+                // positions; self.player may be absent on the server tick.
+                BedPhase::Waiting => {}
                 BedPhase::Fading(start) if start.elapsed().as_secs_f32()>=1.10 => {
                     if self.fapcraft_bia_start_scene(id,waiting) {
                         bed_approaches().lock().unwrap_or_else(|e|e.into_inner())
@@ -425,6 +418,54 @@ impl Game<'_> {
                     }
                 }
                 _ => {}
+            }
+        }
+        self.fapcraft_bia_check_proximity();
+    }
+
+    /// Check after server entity updates and once after the client tick.
+    /// Integrated servers keep the real network player's coordinates in
+    /// Guest records; reading only self.player misses that player entirely.
+    pub(in crate::game) fn fapcraft_bia_check_proximity(&mut self) {
+        let pending:Vec<(u32,BedApproach)>=bed_approaches().lock()
+            .unwrap_or_else(|e|e.into_inner()).iter()
+            .filter_map(|(&id,&state)|matches!(state.phase,BedPhase::Waiting)
+                .then_some((id,state))).collect();
+        if pending.is_empty() {return}
+        let mut players=Vec::new();
+        if let Some(player)=&self.player {
+            players.push([player.position.x,player.position.y,player.position.z]);
+        }
+        if let Some(lan)=&self.lan {
+            for guest in lan.hub.guests.simulation_iter() {
+                if guest.placed && guest.participates_online()
+                    && guest.dimension==self.dim.id() {
+                    players.push(guest.position);
+                }
+            }
+        }
+        if players.is_empty() {return}
+        for (id,waiting) in pending {
+            let Some(mob)=self.mobs.iter().find(|m|m.id==id && !m.removed)
+                else {continue};
+            let body=[mob.position.x,mob.position.y,mob.position.z];
+            if !players.iter().any(|&p|bia_player_is_near(p,body,waiting.target)) {
+                continue;
+            }
+            let now=Instant::now();
+            // Do not nest locks and do not rearm an already-fading scene.
+            let armed={
+                let mut states=bed_approaches().lock()
+                    .unwrap_or_else(|e|e.into_inner());
+                if let Some(state)=states.get_mut(&id)
+                    && matches!(state.phase,BedPhase::Waiting) {
+                    state.phase=BedPhase::Fading(now);
+                    true
+                } else {false}
+            };
+            if armed {
+                *bia_screen_fade().lock().unwrap_or_else(|e|e.into_inner())
+                    = Some(now);
             }
         }
     }
@@ -935,6 +976,14 @@ mod tests {
         // This was a deadlock when the if-let scrutinee owned the guard.
         assert!(bed_approaches().try_lock().is_ok());
         bed_approaches().lock().unwrap().remove(&id);
+    }
+    #[test] fn bia_proximity_uses_feet_and_body_anchor() {
+        let body=[10.5,64.0,10.45];
+        let anchor=[10.5,64.0,9.5];
+        assert!(bia_player_is_near([10.5,64.0,10.1],body,anchor));
+        assert!(bia_player_is_near([11.5,65.0,10.0],body,anchor));
+        assert!(!bia_player_is_near([30.5,64.0,30.5],body,anchor));
+        assert!(!bia_player_is_near([10.5,69.0,10.1],body,anchor));
     }
     #[test] fn bia_anal_prepares_beside_bed() {
         let at=bia_staged_pose("ana",[10.5,64.0,9.5],0.0);
