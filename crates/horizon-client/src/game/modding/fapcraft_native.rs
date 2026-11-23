@@ -60,8 +60,26 @@ static BIA_FAST: AtomicBool = AtomicBool::new(false);
 // The real game camera remains user-selectable. On the first-person camera,
 // render its hands, not the third-person Steve sub-rig inside Bia.
 static BIA_FIRST_PERSON: AtomicBool = AtomicBool::new(true);
+static BIA_JUMP_HELD: AtomicBool = AtomicBool::new(false);
+static BIA_FINISH_REQUEST: AtomicBool = AtomicBool::new(false);
 pub(crate) fn set_bia_first_person(value: bool) {
     BIA_FIRST_PERSON.store(value, Ordering::Relaxed);
+}
+/// Use the same Jump control as original Java's two-actor scene. A rising
+/// edge requests the source clip's ending; it must never trigger merely
+/// because the player was jumping before the interaction started.
+pub(crate) fn set_bia_jump(value: bool) {
+    let previous=BIA_JUMP_HELD.swap(value,Ordering::Relaxed);
+    if value && !previous && bia_session_active() {
+        BIA_FINISH_REQUEST.store(true,Ordering::Relaxed);
+    }
+}
+pub(crate) fn bia_session_active() -> bool {
+    SOCIAL.get().is_some_and(|actions| {
+        actions.lock().unwrap_or_else(|e|e.into_inner())
+            .values().any(|state|state.playlist.is_some()
+                && state.session_started.elapsed().as_secs()<120)
+    })
 }
 pub(crate) fn set_bia_fast(value: bool) {
     BIA_FAST.store(value, Ordering::Relaxed);
@@ -341,23 +359,48 @@ fn social_pose(id: u32) -> Option<(SocialAction, f32)> {
             .and_then(|rig| rig.actions.get(key))
             .map_or(2.0, |clip| clip.duration.clamp(0.25, 12.0))
     };
-    // In the original Java mod the player controls this transition. The
-    // prototype had played slow, fast and end automatically even without input.
-    let loop_choice = match state.action {
-        SocialAction::Clip("anal_slow" | "anal_fast") =>
-            Some(if BIA_FAST.load(Ordering::Relaxed) {"anal_fast"} else {"anal_slow"}),
-        SocialAction::Clip("prone_doggy_soft" | "prone_doggy_hard1") =>
-            Some(if BIA_FAST.load(Ordering::Relaxed) {"prone_doggy_hard1"} else {"prone_doggy_soft"}),
-        _ => None,
+    // Source e0.java: intro -> insert -> soft; Shift controls the
+    // fast loop, which has three separate hard clips. The old prototype
+    // jumped between just soft and hard1 and never exposed hard2/hard3.
+    // Jump requests the ending clip, not a jump of the avatar in place.
+    let current=state.started.elapsed().as_secs_f32();
+    let in_loop=matches!(state.action,SocialAction::Clip(
+        "anal_slow"|"anal_fast"|"prone_doggy_soft"
+        |"prone_doggy_hard1"|"prone_doggy_hard2"|"prone_doggy_hard3"
+    ));
+    if in_loop && BIA_FINISH_REQUEST.swap(false,Ordering::Relaxed) {
+        let ending=if matches!(state.action,SocialAction::Clip(name)
+            if name.starts_with("anal_")) {"anal_cum"}
+            else {"prone_doggy_cum"};
+        state.action=SocialAction::Clip(ending);
+        state.duration=duration(ending);
+        state.phase=state.playlist.map_or(0,|p|p.len().saturating_sub(1));
+        state.started=Instant::now();
+        return Some((state.action,0.0));
+    }
+    let fast=BIA_FAST.load(Ordering::Relaxed);
+    let next_loop=match state.action {
+        SocialAction::Clip("anal_slow") if fast => Some("anal_fast"),
+        SocialAction::Clip("anal_fast") if !fast => Some("anal_slow"),
+        SocialAction::Clip("prone_doggy_soft") if fast => Some("prone_doggy_hard1"),
+        SocialAction::Clip("prone_doggy_hard1"|"prone_doggy_hard2"|"prone_doggy_hard3")
+            if !fast => Some("prone_doggy_soft"),
+        SocialAction::Clip("prone_doggy_hard1") if current>=state.duration =>
+            Some("prone_doggy_hard2"),
+        SocialAction::Clip("prone_doggy_hard2") if current>=state.duration =>
+            Some("prone_doggy_hard3"),
+        SocialAction::Clip("prone_doggy_hard3") if current>=state.duration =>
+            Some("prone_doggy_hard1"),
+        _=>None,
     };
-    if let Some(clip)=loop_choice {
-        if state.action != SocialAction::Clip(clip) {
-            state.action = SocialAction::Clip(clip);
-            state.started = Instant::now();
-            state.duration = duration(clip);
-        }
-        return Some((state.action,state.started.elapsed().as_secs_f32()
-            .rem_euclid(state.duration.max(0.001))));
+    if let Some(next)=next_loop {
+        state.action=SocialAction::Clip(next);
+        state.duration=duration(next);
+        state.started=Instant::now();
+    }
+    if in_loop {
+        let elapsed=state.started.elapsed().as_secs_f32();
+        return Some((state.action,elapsed.rem_euclid(state.duration.max(0.001))));
     }
     let mut time = state.started.elapsed().as_secs_f32();
     if matches!(state.action,SocialAction::Clip("anal_wait"|"sitdownidle")) {
@@ -365,7 +408,14 @@ fn social_pose(id: u32) -> Option<(SocialAction, f32)> {
     }
     if time >= state.duration {
         let next = state.playlist.and_then(|items| items.get(state.phase + 1)).copied();
-        let Some(next) = next else { return None };
+        let Some(next) = next else {
+            // Source final clip has ended. Clear both actors' session to
+            // restore the mob's physics and the player's movement controls.
+            if state.playlist.is_some() {
+                actions.remove(&id);
+            }
+            return None
+        };
         state.phase += 1;
         state.action = SocialAction::Clip(next);
         state.duration = duration(next);
@@ -863,6 +913,15 @@ pub(super) fn install(registry: &mut dyn EntityRenderers) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bia_camera_and_jump_input_are_explicit() {
+        set_bia_first_person(true);
+        assert!(BIA_FIRST_PERSON.load(Ordering::Relaxed));
+        set_bia_first_person(false);
+        assert!(!BIA_FIRST_PERSON.load(Ordering::Relaxed));
+        set_bia_jump(false);
+        assert!(!BIA_JUMP_HELD.load(Ordering::Relaxed));
+    }
     #[test]
     fn bia_fast_toggle_is_explicit() {
         set_bia_fast(true);
