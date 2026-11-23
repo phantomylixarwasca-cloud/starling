@@ -187,6 +187,9 @@ pub(crate) fn trigger_bia_sequence(id: u32, choice: &str) -> bool {
 pub(crate) fn social_active(id: u32) -> bool {
     social_pose(id).is_some()
 }
+fn paired_clip(name: &str) -> bool {
+    name.starts_with("anal_") || name.starts_with("prone_doggy_")
+}
 /// Contact interactions temporarily stop player walking, as the original
 /// two-actor controller does. The ordinary player movement loop restores its
 /// previous movement rules as soon as the animation finishes.
@@ -194,11 +197,14 @@ pub(crate) fn paired_action_active() -> bool {
     let Some(active) = SOCIAL.get() else { return false; };
     let active = active.lock().unwrap_or_else(|p| p.into_inner());
     active.values().any(|state| {
-        state.started.elapsed().as_secs_f32() < state.duration
-            && matches!(state.action,
+        (state.started.elapsed().as_secs_f32() < state.duration
+            || (state.playlist.is_some()
+                && state.session_started.elapsed().as_secs()<120))
+            && (matches!(state.action,
                 SocialAction::Headpat |
                 SocialAction::Clip("head_pat") |
                 SocialAction::Clip("hug"))
+                || matches!(state.action, SocialAction::Clip(name) if paired_clip(name)))
     })
 }
 /// Simple player-half counterpart for non-explicit contact gestures. It
@@ -211,9 +217,11 @@ impl BodyPose for FapcraftPlayerPose {
         let Some(active) = SOCIAL.get() else { return false };
         let guard = active.lock().unwrap_or_else(|p| p.into_inner());
         let Some(state) = guard.values()
-            .filter(|s| s.started.elapsed().as_secs_f32() < s.duration)
+            .filter(|s| s.started.elapsed().as_secs_f32() < s.duration
+                || (s.playlist.is_some() && s.session_started.elapsed().as_secs()<120))
             .filter(|s| matches!(s.action, SocialAction::Headpat
-                | SocialAction::Clip("head_pat") | SocialAction::Clip("hug")))
+                | SocialAction::Clip("head_pat") | SocialAction::Clip("hug"))
+                || matches!(s.action,SocialAction::Clip(name) if paired_clip(name)))
             .max_by_key(|s| s.started)
         else { return false };
         let time=state.started.elapsed().as_secs_f32();
@@ -222,6 +230,25 @@ impl BodyPose for FapcraftPlayerPose {
         let ease_out=((1.0-phase)*8.0).min(1.0);
         let blend=ease_in*ease_out;
         match state.action {
+            SocialAction::Clip(name) if paired_clip(name) => {
+                // Reuse the player's own skin and limbs, but drive them from
+                // the original GeckoLib player-bone channels in the same
+                // clip as the NPC, synchronized to one animation clock.
+                let original = rigs().get(2).and_then(Option::as_ref)
+                    .and_then(|rig| rig.actions.get(name));
+                if let Some(clip)=original {
+                    for (bone,part) in [("Torso2",1usize),("RightArm",2),
+                        ("LeftArm",3),("RightLeg",4),("LeftLeg",5)] {
+                        if let Some(channels)=clip.bones.get(bone)
+                            && !channels.rotation.is_empty() {
+                            let degrees=sample(&channels.rotation,time,[0.0;3]);
+                            poses[part][3]=degrees[0].to_radians()*blend;
+                            poses[part][4]=-degrees[1].to_radians()*blend;
+                            poses[part][5]=degrees[2].to_radians()*blend;
+                        }
+                    }
+                }
+            }
             SocialAction::Clip("hug") => {
                 // Both forearms reach toward the character.
                 poses[2][3] = -1.20 * blend;
@@ -288,6 +315,9 @@ fn social_pose(id: u32) -> Option<(SocialAction, f32)> {
             .rem_euclid(state.duration.max(0.001))));
     }
     let mut time = state.started.elapsed().as_secs_f32();
+    if matches!(state.action,SocialAction::Clip("anal_wait"|"sitdownidle")) {
+        return Some((state.action,time.rem_euclid(state.duration.max(0.001))));
+    }
     if time >= state.duration {
         let next = state.playlist.and_then(|items| items.get(state.phase + 1)).copied();
         let Some(next) = next else { return None };
