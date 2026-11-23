@@ -42,18 +42,20 @@ fn bia_screen_fade() -> &'static Mutex<Option<Instant>> {
 /// The bed search chooses a clear *walking* tile beside the bed. The source
 /// sitdown geometry is not centered on that tile. Stage the visible character
 /// toward the bed's surface only after navigation completes.
-fn bia_staged_pose(choice:&str, anchor:[f64;3],yaw:f32)->[f64;3] {
-    let angle=f64::from(yaw).to_radians();
-    let forward=[-angle.sin(),angle.cos()];
-    // The source e0.java sits at the bed block's Y coordinate and disables
-    // gravity/physics in the preparation phase. Adding bed height here moved
-    // the whole animated model half a block into the air.
-    let depth=if choice=="doggy" {0.95} else {0.38};
-    let height=0.0;
-    [anchor[0]+forward[0]*depth,anchor[1]+height,
-        anchor[2]+forward[1]*depth]
+/// e0.java's o_Vec3d is the collision-free tile next to the bed. The
+/// SITDOWN and ANAL_PREPARE GeoBone keyframes already offset the visible
+/// model onto the bed. Moving the whole NPC beforehand double-counts that
+/// offset and leaves Bia floating/separated during her waiting clip.
+fn bia_staged_pose(_choice:&str,anchor:[f64;3],_yaw:f32)->[f64;3] {
+    anchor
 }
-
+/// e0.java moves Bia's entity one block toward the bed only AFTER the
+/// 22-tick screen transition for PRONE_DOGGY_INTRO.
+fn bia_scene_pose(choice:&str,anchor:[f64;3],yaw:f32)->[f64;3] {
+    if choice!="doggy" {return anchor}
+    let angle=f64::from(yaw).to_radians();
+    [anchor[0]-angle.sin(),anchor[1],anchor[2]+angle.cos()]
+}
 
 fn bed_approaches() -> &'static Mutex<HashMap<u32, BedApproach>> {
     BED_APPROACHES.get_or_init(||Mutex::new(HashMap::new()))
@@ -635,7 +637,7 @@ impl Game<'_> {
         mob.yaw=waiting.yaw;
         mob.body_yaw=waiting.yaw;
         mob.head_yaw=waiting.yaw;
-        let pose=bia_staged_pose(waiting.choice,waiting.target,waiting.yaw);
+        let pose=bia_scene_pose(waiting.choice,waiting.target,waiting.yaw);
         mob.position=Vec3::new(pose[0],pose[1],pose[2]);
         mob.previous=mob.position;
         mob.velocity=Vec3::ZERO;
@@ -971,13 +973,17 @@ impl Game<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test] fn bia_places_doggy_pose_on_bed_surface() {
+    #[test] fn bia_waits_at_original_navigation_anchor() {
         let at=bia_staged_pose("doggy",[10.5,64.0,9.5],0.0);
-        assert!((at[0]-10.5).abs()<1e-6);
-        assert!((at[1]-64.0).abs()<1e-6);
-        assert!((at[2]-10.45).abs()<1e-6);
-        let west=bia_staged_pose("doggy",[9.5,64.0,10.5],-90.0);
-        assert!((west[0]-10.45).abs()<1e-6);
+        assert_eq!(at,[10.5,64.0,9.5]);
+        let ana=bia_staged_pose("ana",[10.5,64.0,9.5],0.0);
+        assert_eq!(ana,at);
+    }
+    #[test] fn bia_moves_one_block_only_during_doggy_transition() {
+        assert_eq!(bia_scene_pose("doggy",[10.5,64.0,9.5],0.0),
+            [10.5,64.0,10.5]);
+        assert_eq!(bia_scene_pose("ana",[10.5,64.0,9.5],0.0),
+            [10.5,64.0,9.5]);
     }
     #[test] fn right_click_snapshot_releases_mutex_before_state_change() {
         let id=927_426_163_u32;
@@ -1003,8 +1009,7 @@ mod tests {
     }
     #[test] fn bia_anal_prepares_beside_bed() {
         let at=bia_staged_pose("ana",[10.5,64.0,9.5],0.0);
-        assert!((at[2]-9.88).abs()<1e-6);
-        assert!((at[1]-64.0).abs()<1e-6);
+        assert_eq!(at,[10.5,64.0,9.5]);
     }
     #[test] fn menu_has_no_fake_functional_buttons() {
         assert_eq!(labels("jenny",0,Page::Actions).len(),7);
