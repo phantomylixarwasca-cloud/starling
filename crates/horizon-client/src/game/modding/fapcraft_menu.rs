@@ -7,7 +7,7 @@ use horizon_client::{
     text::Text,
     ui,
 };
-use std::{collections::HashMap, sync::{Mutex, OnceLock}};
+use std::{collections::HashMap, sync::{Mutex, OnceLock}, time::Instant};
 
 /// Scene requests only become active once an actual bed is found and the NPC
 /// has reached it. This intentionally does not trigger a scene by menu click.
@@ -15,7 +15,10 @@ use std::{collections::HashMap, sync::{Mutex, OnceLock}};
 struct BedApproach {
     choice: &'static str,
     target: [f64; 3],
+    phase: BedPhase,
 }
+#[derive(Clone, Copy, Debug)]
+enum BedPhase { Navigating, Preparing(Instant), Waiting }
 static BED_APPROACHES: OnceLock<Mutex<HashMap<u32, BedApproach>>> = OnceLock::new();
 fn bed_approaches() -> &'static Mutex<HashMap<u32, BedApproach>> {
     BED_APPROACHES.get_or_init(||Mutex::new(HashMap::new()))
@@ -205,6 +208,60 @@ fn button_rect(x:f32,y:f32,w:f32,i:usize)->(f32,f32,f32,f32) {
 }
 
 impl Game<'_> {
+    /// Tick the original two-stage interaction: navigate, prepare, wait for
+    /// proximity. Shift is read from the game's existing sneak-key state.
+    pub(super) fn fapcraft_bia_tick(&mut self) {
+        let fast=self.native_player().and_then(|p|
+            self.player_is_secondary_use_active(p)).unwrap_or(false);
+        super::fapcraft_native::set_bia_fast(fast);
+        let waits: Vec<(u32,BedApproach)>=bed_approaches()
+            .lock().unwrap_or_else(|e|e.into_inner())
+            .iter().map(|(id,state)|(*id,*state)).collect();
+        for (id,waiting) in waits {
+            let Some(npc)=i32::try_from(id).ok()
+                .and_then(|number|self.level_entity(number))
+                .and_then(|target|self.target_position(target)) else {continue};
+            let distance=((npc[0]-waiting.target[0]).powi(2)
+                +(npc[1]-waiting.target[1]).powi(2)
+                +(npc[2]-waiting.target[2]).powi(2)).sqrt();
+            match waiting.phase {
+                BedPhase::Navigating if distance<1.20 => {
+                    let clip=if waiting.choice=="ana" {"anal_prepare"} else {"sitdown"};
+                    super::fapcraft_native::trigger_social(id,"bia",clip);
+                    if let Some(state)=bed_approaches()
+                        .lock().unwrap_or_else(|e|e.into_inner()).get_mut(&id) {
+                        state.phase=BedPhase::Preparing(Instant::now());
+                    }
+                }
+                BedPhase::Preparing(started) if started.elapsed().as_secs_f32()
+                    >= if waiting.choice=="ana" {5.52} else {2.5} => {
+                    let clip=if waiting.choice=="ana" {"anal_wait"} else {"sitdownidle"};
+                    super::fapcraft_native::trigger_social(id,"bia",clip);
+                    if let Some(state)=bed_approaches()
+                        .lock().unwrap_or_else(|e|e.into_inner()).get_mut(&id) {
+                        state.phase=BedPhase::Waiting;
+                    }
+                }
+                BedPhase::Waiting if distance<1.5 => {
+                    if let Some(player)=self.player.as_ref().map(|p|p.position) {
+                        let from_player=((npc[0]-player.x).powi(2)
+                            +(npc[1]-player.y).powi(2)
+                            +(npc[2]-player.z).powi(2)).sqrt();
+                        if from_player<1.9 && self.fapcraft_align_player_for_contact(id as i32) {
+                            bed_approaches().lock().unwrap_or_else(|e|e.into_inner())
+                                .remove(&id);
+                            super::fapcraft_native::trigger_bia_sequence(id,waiting.choice);
+                            self.send_overlay_message(Text::literal(
+                                "Bia: interacción lista; mantén Shift para cambiar el ritmo"
+                            ));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Find the closest reachable floor tile adjacent to a bed. The source
     /// mod e0.java scans Minecraft beds and refuses a blocked position.
     /// Limit our lookup to loaded chunks and require two air blocks at target.
@@ -267,7 +324,7 @@ impl Game<'_> {
         }
         if let Ok(id)=u32::try_from(id) {
             bed_approaches().lock().unwrap_or_else(|e|e.into_inner())
-                .insert(id,BedApproach{choice,target});
+                .insert(id,BedApproach{choice,target,phase:BedPhase::Navigating});
         }
         self.send_overlay_message(Text::literal(
             "Bia se dirige a la cama. Acércate y vuelve a interactuar con ella."
