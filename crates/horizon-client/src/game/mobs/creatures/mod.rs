@@ -1304,6 +1304,21 @@ impl Game<'_> {
         let passenger_objects = self.retained_passenger_snapshot(uuid);
         let mut pending = self.creatures.pending.remove(level_id).unwrap_or_default();
         let primable = self.sulfur_cubes_adopted_explosive();
+        // Fapcraft interactions need the world entity to stand still while
+        // its original GeckoLib animation plays. Pause only these mobs for
+        // the current server tick, and restore the previous NoAI state after
+        // the tick: this does not change saved mob settings.
+        let mut fapcraft_paused = Vec::new();
+        for mob in self.mobs.iter_mut() {
+            if mob.kind.id.starts_with("sexmod:")
+                && crate::game::fapcraft_native::social_active(mob.id)
+            {
+                fapcraft_paused.push((mob.id, mob.no_ai));
+                mob.no_ai = true;
+                mob.velocity = Vec3::ZERO;
+                mob.needs_sync = true;
+            }
+        }
         let mut mobs = self.mobs.lift();
         #[cfg(test)]
         super::entity::taken_pass_tests::after_take(self);
@@ -1393,6 +1408,11 @@ impl Game<'_> {
         // as it is instead of being copied into a new one, every mob a tick.
         self.mobs
             .restore(mobs, horizon_client::join_seq::RestoreOrder::SpawnsFirst);
+        for (id, original_no_ai) in fapcraft_paused {
+            if let Some(mob) = self.mobs.iter_mut().find(|mob| mob.id == id) {
+                mob.no_ai = original_no_ai;
+            }
+        }
         if dispatch_panic.is_some() {
             // These death callbacks have not run, and the borrowed block writes
             // must still invalidate paths on the next attempted pass.
