@@ -40,6 +40,41 @@ enum SocialAction { Talk, Headpat, Clip(&'static str) }
 struct SocialState { action: SocialAction, started: Instant, duration: f32 }
 static SOCIAL: OnceLock<Mutex<HashMap<u32, SocialState>>> = OnceLock::new();
 
+/// Companion orders mirror the five management options of the original
+/// Forge m.java / e2.java menu. Orders are runtime-only until the native
+/// saved-data adapter is installed; do not present them as persistent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CompanionMode { Follow, Stay, ReturnHome }
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CompanionOrder {
+    pub mode: CompanionMode,
+    pub home: [f64; 3],
+}
+static COMPANIONS: OnceLock<Mutex<HashMap<u32, CompanionOrder>>> = OnceLock::new();
+fn companion_orders() -> &'static Mutex<HashMap<u32, CompanionOrder>> {
+    COMPANIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+pub(crate) fn companion_order(id: u32) -> Option<CompanionOrder> {
+    companion_orders().lock().unwrap_or_else(|e| e.into_inner()).get(&id).copied()
+}
+pub(crate) fn set_companion_mode(id: u32, mode: CompanionMode, position: [f64; 3]) {
+    let mut data = companion_orders().lock().unwrap_or_else(|e| e.into_inner());
+    let order = data.entry(id).or_insert(CompanionOrder {
+        mode: CompanionMode::Stay,
+        home: position,
+    });
+    order.mode = mode;
+}
+pub(crate) fn set_companion_home(id: u32, position: [f64; 3]) {
+    let mut data = companion_orders().lock().unwrap_or_else(|e| e.into_inner());
+    let order = data.entry(id).or_insert(CompanionOrder {
+        mode: CompanionMode::Stay,
+        home: position,
+    });
+    order.home = position;
+    order.mode = CompanionMode::Stay;
+}
+
 /// Right-click interaction dispatch (called by item_actions.rs), separated
 /// from entity model rendering. Social poses automatically expire.
 pub(crate) fn trigger_social(id: u32, kind: &str, clip: &'static str) {
