@@ -5454,6 +5454,9 @@ impl Game<'_> {
             self.draw_book(&mut batch);
         }
         self.draw_studio_bars(&mut batch);
+        // The original Fapcraft hand-off briefly covers the scene while the
+        // player and Bia are positioned. Draw over the whole HUD on Android.
+        self.fapcraft_bia_draw_fade(&mut batch);
         menus.finish(&mut batch);
         if show_hud {
             self.draw_pad_guide(&mut batch, guide_from);
