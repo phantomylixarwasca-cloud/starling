@@ -374,7 +374,8 @@ impl Game<'_> {
         let opacity=if t<0.32 {(t/0.32*255.0) as u8}
             else if t<0.50 {255}
             else {((0.86-t)/0.36*255.0) as u8};
-        batch.fill(&self.gui.atlas,0.0,0.0,batch.width,batch.height,
+        let (width,height)=(batch.width,batch.height);
+        batch.fill(&self.gui.atlas,0.0,0.0,width,height,
             rgba(0,0,0,opacity));
     }
 
