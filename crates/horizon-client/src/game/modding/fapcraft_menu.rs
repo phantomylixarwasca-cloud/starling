@@ -211,8 +211,9 @@ impl Game<'_> {
     /// Tick the original two-stage interaction: navigate, prepare, wait for
     /// proximity. Shift is read from the game's existing sneak-key state.
     pub(super) fn fapcraft_bia_tick(&mut self) {
-        let fast=self.native_player().and_then(|p|
-            self.player_is_secondary_use_active(p)).unwrap_or(false);
+        // PlayerMotion already exposes the active sneak/Shift state;
+        // native_player() is not a PlayerRef and cannot be passed here.
+        let fast=self.player.as_ref().is_some_and(|p| p.shift_key_down);
         super::fapcraft_native::set_bia_fast(fast);
         let waits: Vec<(u32,BedApproach)>=bed_approaches()
             .lock().unwrap_or_else(|e|e.into_inner())
