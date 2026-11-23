@@ -74,7 +74,7 @@ fn character_actions(kind: &str) -> &'static [CharacterAction] {
         "jenny" => &[
             CharacterAction{label:"Saludar",clip:"wave",response:"¡Hola!"},
             CharacterAction{label:"Alegrarse",clip:"fhappy",response:"Jiji~"},
-            CharacterAction{label:"Ofrecer intercambio",clip:"payment",response:"¿Un trato?"},
+            CharacterAction{label:"Gesto de intercambio",clip:"payment",response:"¿Un trato?"},
             CharacterAction{label:"Bailar",clip:"fortnite",response:"¡Vamos!"},
         ],
         "ellie" => &[
