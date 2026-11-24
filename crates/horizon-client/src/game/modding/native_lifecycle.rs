@@ -325,6 +325,9 @@ impl Game<'_> {
 
     /// An errored tick returned at `result?` before this site.
     pub(super) fn native_lifecycle_server_tick_end(&mut self, paused: bool) {
+        if !paused {
+            self.fapcraft_bia_tick();
+        }
         if let Some((context, phase)) = self.native_lifecycle.server_tick_end(paused) {
             self.native_lifecycle.read_scope = true;
             self.native_server_tick(&context, phase);

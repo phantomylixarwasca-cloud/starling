@@ -226,6 +226,9 @@ pub struct BlockEntityDraw {
     lights: (Vec3, Vec3),
     vertices: Vec<Vertex>,
     kept: bool,
+    /// Animated entity geometry must keep real face normals for shader packs.
+    /// Without them an Iris/Horizon shader may multiply the NPC texture by zero.
+    entity_normals: bool,
     /// Where each turning part starts in `vertices` (`spin`), and where the
     /// parts standing still start again (`still`, none).
     spins: Vec<(usize, Option<Spin>)>,
@@ -371,6 +374,7 @@ impl BlockEntityDraw {
             lights,
             vertices,
             kept: false,
+            entity_normals: true,
             spins: Vec::new(),
             prepared: false,
             records: Vec::new(),
@@ -585,7 +589,7 @@ impl BlockEntityDraw {
         // A turning part is lit where it turns to (`place_turning` turns the
         // normal, the shader lights it, as `draw_block`'s faces are lit);
         // a part standing still keeps its light in its colour.
-        let (color, normal) = if self.spinning() {
+        let (color, normal) = if self.spinning() || self.entity_normals {
             let n = (normal * 127.0).round();
             (shaded(tint, 1.0), [n.x as i8, n.y as i8, n.z as i8, 127])
         } else {
@@ -779,6 +783,7 @@ impl Game<'_> {
             lights: diffuse_lights(self.nether_lighting()),
             vertices: std::mem::take(out),
             kept: false,
+            entity_normals: false,
             spins: Vec::new(),
             prepared: prepared_route(
                 self.pack_ids.is_some(),
@@ -1389,6 +1394,7 @@ mod tests {
             lights: diffuse_lights(false),
             vertices: Vec::new(),
             kept: false,
+            entity_normals: false,
             spins: Vec::new(),
             prepared: false,
             records: Vec::new(),

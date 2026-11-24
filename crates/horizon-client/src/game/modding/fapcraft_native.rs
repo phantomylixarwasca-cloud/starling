@@ -7,7 +7,7 @@
 use mod_api::{BlockEntityDrawContext, EntityRenderState, EntityRenderer, EntityRenderers};
 use horizon_client::mobs::anim::BodyPose;
 use serde_json::Value;
-use std::{collections::HashMap, fs::File, io::Read, path::PathBuf, sync::{Arc, Mutex, OnceLock}, time::Instant};
+use std::{collections::HashMap, fs::File, io::Read, path::PathBuf, sync::{atomic::{AtomicBool,Ordering}, Arc, Mutex, OnceLock}, time::Instant};
 
 struct Character { id: &'static str, geo: &'static str, animation: &'static str, alias: &'static str }
 const CHARACTERS: [Character; 11] = [
@@ -37,16 +37,109 @@ enum Easing {
 }
 #[derive(Default)]
 struct Channels { rotation: Vec<Key>, position: Vec<Key>, scale: Vec<Key> }
-struct Clip { duration: f32, bones: HashMap<String, Channels> }
+#[derive(Clone, Debug)]
+struct SoundCue { time:f32, effect:String }
+struct Clip { duration: f32, bones: HashMap<String, Channels>, sound_cues: Vec<SoundCue> }
+#[derive(Clone)]
 struct BoxGeometry { origin: [f32; 3], size: [f32; 3], inflation: f32, pivot: Option<[f32; 3]>, rotation: [f32; 3], uv: [Option<[f32; 4]>; 6], swap_sides: bool, flip_uv: bool }
+#[derive(Clone)]
 struct Bone { name: String, pivot: [f32; 3], rotation: [f32; 3], children: Vec<usize>, cubes: Vec<BoxGeometry> }
-struct Rig { sprite: String, bones: Vec<Bone>, roots: Vec<usize>, idle: Option<Clip>, walk: Option<Clip>, run: Option<Clip>, talk: Option<Clip>, headpat: Option<Clip>, actions: HashMap<&'static str, Clip> }
+struct Rig { sprite: String, bones: Vec<Bone>, roots: Vec<usize>, nude: Option<Box<Rig>>, idle: Option<Clip>, walk: Option<Clip>, run: Option<Clip>, talk: Option<Clip>, headpat: Option<Clip>, actions: HashMap<String, Clip> }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SocialAction { Talk, Headpat, Clip(&'static str) }
 #[derive(Clone, Copy)]
-struct SocialState { action: SocialAction, kind: &'static str, started: Instant, duration: f32 }
+struct SocialState {
+    action: SocialAction,
+    kind: &'static str,
+    started: Instant,
+    duration: f32,
+    playlist: Option<&'static [&'static str]>,
+    phase: usize,
+    session_started: Instant,
+    sound_clip: Option<&'static str>,
+    sound_time: f32,
+    sound_counter: u32,
+}
+static BIA_FAST: AtomicBool = AtomicBool::new(false);
+// The real game camera remains user-selectable. On the first-person camera,
+// render its hands, not the third-person Steve sub-rig inside Bia.
+static BIA_FIRST_PERSON: AtomicBool = AtomicBool::new(true);
+/// Pending one-shot camera change; cleared by the Android client tick, not
+/// by the integrated server's render-independent state machine.
+static BIA_INITIAL_POV: AtomicBool = AtomicBool::new(false);
+static BIA_CLIENT_WAS_PAIRED: AtomicBool = AtomicBool::new(false);
+pub(crate) fn take_bia_initial_pov()->bool {
+    // A server-side trigger can be set before client initialization and was
+    // sometimes lost in the mobile build. The client independently detects
+    // the first tick of a paired scene; subsequent perspective toggles are
+    // never overridden by this one-time request.
+    let active=bia_session_active();
+    let previous=BIA_CLIENT_WAS_PAIRED.swap(active,Ordering::Relaxed);
+    let requested=BIA_INITIAL_POV.swap(false,Ordering::Relaxed);
+    active && (!previous || requested)
+}
+static BIA_JUMP_HELD: AtomicBool = AtomicBool::new(false);
+static BIA_FINISH_REQUEST: AtomicBool = AtomicBool::new(false);
+pub(crate) fn set_bia_first_person(value: bool) {
+    BIA_FIRST_PERSON.store(value, Ordering::Relaxed);
+}
+/// Use the same Jump control as original Java's two-actor scene. A rising
+/// edge requests the source clip's ending; it must never trigger merely
+/// because the player was jumping before the interaction started.
+pub(crate) fn set_bia_jump(value: bool) {
+    let previous=BIA_JUMP_HELD.swap(value,Ordering::Relaxed);
+    if value && !previous && bia_session_active() {
+        BIA_FINISH_REQUEST.store(true,Ordering::Relaxed);
+    }
+}
+pub(crate) fn bia_session_active() -> bool {
+    SOCIAL.get().is_some_and(|actions| {
+        actions.lock().unwrap_or_else(|e|e.into_inner())
+            .values().any(|state|state.playlist.is_some()
+                && state.session_started.elapsed().as_secs()<120)
+    })
+}
+pub(crate) fn set_bia_fast(value: bool) {
+    BIA_FAST.store(value, Ordering::Relaxed);
+}
+const BIA_DOGGY: &[&str] = &[
+    "prone_doggy_intro", "prone_doggy_insert", "prone_doggy_soft",
+    "prone_doggy_hard1", "prone_doggy_hard2", "prone_doggy_hard3",
+    "prone_doggy_cum",
+];
+const BIA_ANA: &[&str] = &[
+    // The bed phase already played anal_prepare, then held anal_wait.
+    "anal_start", "anal_slow", "anal_fast", "anal_cum",
+];
 static SOCIAL: OnceLock<Mutex<HashMap<u32, SocialState>>> = OnceLock::new();
+static BIA_UNDRESSED: OnceLock<Mutex<HashMap<u32, bool>>> = OnceLock::new();
+static BIA_WARDROBE_PENDING: OnceLock<Mutex<HashMap<u32, (Instant, bool)>>> = OnceLock::new();
+/// Forge e0.java only switches geometry after the "becomeNude" sound keyframe
+/// in animation.bia.strip, at 3.0 seconds; stripDone is at 5.0 seconds.
+pub(crate) fn toggle_bia_dress(id: u32) -> Option<bool> {
+    let mut pending = BIA_WARDROBE_PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock().unwrap_or_else(|e| e.into_inner());
+    if pending.contains_key(&id) { return None; }
+    let dressed = BIA_UNDRESSED.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock().unwrap_or_else(|e| e.into_inner());
+    let value = !dressed.get(&id).copied().unwrap_or(false);
+    pending.insert(id, (Instant::now(), value));
+    Some(value)
+}
+fn bia_undressed(id: u32) -> bool {
+    if let Some(pending) = BIA_WARDROBE_PENDING.get() {
+        let mut pending = pending.lock().unwrap_or_else(|e|e.into_inner());
+        if pending.get(&id).is_some_and(|(started,_)| started.elapsed().as_secs_f32() >= 3.0) {
+            if let Some((_,value))=pending.remove(&id) {
+                BIA_UNDRESSED.get_or_init(|| Mutex::new(HashMap::new()))
+                    .lock().unwrap_or_else(|e|e.into_inner()).insert(id,value);
+            }
+        }
+    }
+    BIA_UNDRESSED.get().and_then(|state|
+        state.lock().ok().and_then(|m| m.get(&id).copied())).unwrap_or(false)
+}
 
 /// Companion orders mirror the five management options of the original
 /// Forge m.java / e2.java menu. Orders are runtime-only until the native
@@ -110,13 +203,58 @@ pub(crate) fn trigger_social(id: u32, kind: &str, clip: &'static str) {
         },
         started: Instant::now(),
         duration,
+        playlist: None,
+        phase: 0,
+        session_started: Instant::now(),
+        sound_clip: None,
+        sound_time: -1.0,
+        sound_counter: 0,
     });
 }
+/// Preview of Bia's original clip sequences; input-driven speed and camera
+/// changes from Forge still require a separate native controller.
+pub(crate) fn trigger_bia_sequence(id: u32, choice: &str) -> bool {
+    let sequence = match choice {
+        "doggy" => BIA_DOGGY,
+        "ana" => BIA_ANA,
+        _ => return false,
+    };
+    let Some(&first) = sequence.first() else { return false };
+    trigger_social(id, "bia", first);
+    if let Some(active) = SOCIAL.get() {
+        if let Some(state) = active.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&id) {
+            state.playlist = Some(sequence);
+            // In Java the black-screen handoff begins in POV. Request the
+            // camera change in the *client* world rather than the integrated
+            // server where it had no effect.
+            BIA_INITIAL_POV.store(true,Ordering::Relaxed);
+            return true;
+        }
+    }
+    false
+}
+
 /// The integrated world server pauses a character's wandering AI only while
 /// an actual social clip is playing. Other mobs and the user's saved NoAI
 /// setting are left untouched.
 pub(crate) fn social_active(id: u32) -> bool {
     social_pose(id).is_some()
+}
+/// Allow the player to end a paired sequence by interacting with Bia again.
+pub(crate) fn stop_bia_sequence(id: u32) -> bool {
+    SOCIAL.get().and_then(|states| {
+        let mut states=states.lock().unwrap_or_else(|e|e.into_inner());
+        if states.get(&id).is_some_and(|state|state.playlist.is_some()) {
+            states.remove(&id);
+            Some(())
+        } else { None }
+    }).is_some()
+}
+fn paired_clip(name: &str) -> bool {
+    // Bed preparation and idle must never immobilize the player: they need
+    // to walk toward Bia before the paired controller begins.
+    (name.starts_with("anal_") && !matches!(name,"anal_prepare"|"anal_wait"))
+        || name.starts_with("prone_doggy_")
 }
 /// Contact interactions temporarily stop player walking, as the original
 /// two-actor controller does. The ordinary player movement loop restores its
@@ -125,11 +263,14 @@ pub(crate) fn paired_action_active() -> bool {
     let Some(active) = SOCIAL.get() else { return false; };
     let active = active.lock().unwrap_or_else(|p| p.into_inner());
     active.values().any(|state| {
-        state.started.elapsed().as_secs_f32() < state.duration
-            && matches!(state.action,
+        (state.started.elapsed().as_secs_f32() < state.duration
+            || (state.playlist.is_some()
+                && state.session_started.elapsed().as_secs()<120))
+            && (matches!(state.action,
                 SocialAction::Headpat |
                 SocialAction::Clip("head_pat") |
                 SocialAction::Clip("hug"))
+                || matches!(state.action, SocialAction::Clip(name) if paired_clip(name)))
     })
 }
 /// Simple player-half counterpart for non-explicit contact gestures. It
@@ -139,20 +280,64 @@ pub(crate) fn paired_action_active() -> bool {
 pub(crate) struct FapcraftPlayerPose;
 impl BodyPose for FapcraftPlayerPose {
     fn pose(&self, _age:f32, _at_rest:&[[f32;9];6], poses:&mut [[f32;9];6]) -> bool {
-        let Some(active) = SOCIAL.get() else { return false };
-        let guard = active.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(state) = guard.values()
-            .filter(|s| s.started.elapsed().as_secs_f32() < s.duration)
-            .filter(|s| matches!(s.action, SocialAction::Headpat
-                | SocialAction::Clip("head_pat") | SocialAction::Clip("hug")))
-            .max_by_key(|s| s.started)
-        else { return false };
-        let time=state.started.elapsed().as_secs_f32();
-        let phase=(time/state.duration.max(0.001)).clamp(0.0,1.0);
+        // Select the active actor by entity id. Copy the state and release
+        // the lock BEFORE asking social_pose() for the rendered clip; that
+        // function may advance phases and locks SOCIAL itself.
+        let (id,state) = {
+            let Some(active)=SOCIAL.get() else {return false};
+            let guard=active.lock().unwrap_or_else(|p|p.into_inner());
+            let Some((&id,state))=guard.iter()
+                .filter(|(_,s)|s.started.elapsed().as_secs_f32()<s.duration
+                    || (s.playlist.is_some()
+                        && s.session_started.elapsed().as_secs()<120))
+                .filter(|(_,s)|matches!(s.action,SocialAction::Headpat
+                    | SocialAction::Clip("head_pat") | SocialAction::Clip("hug"))
+                    || matches!(s.action,SocialAction::Clip(name)
+                        if paired_clip(name)))
+                .max_by_key(|(_,s)|s.started)
+            else {return false};
+            (id,*state)
+        };
+        // This is the exact same clock and transition used by Renderer::submit
+        // for Bia; the old player code used a different phase after Shift or
+        // the clip boundary, so arms/legs drifted out of sync.
+        let (action,time)=social_pose(id)
+            .unwrap_or((state.action,state.started.elapsed().as_secs_f32()));
+        let duration=match action {
+            SocialAction::Clip(name)=>rigs().get(2).and_then(Option::as_ref)
+                .and_then(|rig|rig.actions.get(name))
+                .map_or(state.duration,|clip|clip.duration),
+            _=>state.duration,
+        };
+        let phase=(time/duration.max(0.001)).clamp(0.0,1.0);
         let ease_in=(phase*8.0).min(1.0);
         let ease_out=((1.0-phase)*8.0).min(1.0);
-        let blend=ease_in*ease_out;
-        match state.action {
+        // Looping paired scenes must not fade out at the end of every clip.
+        let blend=if matches!(action,SocialAction::Clip(name)
+                if paired_clip(name)) {
+            (state.session_started.elapsed().as_secs_f32()*6.0).min(1.0)
+        } else {ease_in*ease_out};
+        match action {
+            SocialAction::Clip(name) if paired_clip(name) => {
+                // Reuse the player's own skin and limbs, but drive them from
+                // the original GeckoLib player-bone channels in the same
+                // clip as the NPC, synchronized to one animation clock.
+                let original = rigs().get(2).and_then(Option::as_ref)
+                    .and_then(|rig| rig.actions.get(name));
+                if let Some(clip)=original {
+                    for (bone,part) in [("Head2",0usize),("Torso2",1),
+                        ("RightArm",2),("LeftArm",3),("RightLeg",4),
+                        ("LeftLeg",5)] {
+                        if let Some(channels)=clip.bones.get(bone)
+                            && !channels.rotation.is_empty() {
+                            let degrees=sample(&channels.rotation,time,[0.0;3]);
+                            poses[part][3]=degrees[0].to_radians()*blend;
+                            poses[part][4]=-degrees[1].to_radians()*blend;
+                            poses[part][5]=degrees[2].to_radians()*blend;
+                        }
+                    }
+                }
+            }
             SocialAction::Clip("hug") => {
                 // Both forearms reach toward the character.
                 poses[2][3] = -1.20 * blend;
@@ -188,18 +373,284 @@ impl BodyPose for FapcraftPlayerPose {
         true
     }
 }
-fn social_pose(id: u32) -> Option<(SocialAction, f32)> {
-    let actions = SOCIAL.get()?.lock().unwrap_or_else(|p| p.into_inner());
-    let state = actions.get(&id)?;
-    let time = state.started.elapsed().as_secs_f32();
-    (time < state.duration).then_some((state.action, time))
+/// Bia's source keyframe transitions, independently testable without a
+/// live world or Android. The hard clips declare 2.04167 s but repeat at
+/// their `doggyReset` keyframe (0.625 s), not at the declared end.
+fn bia_loop_followup(action:SocialAction,fast:bool,elapsed:f32)
+    ->Option<&'static str> {
+    match action {
+        SocialAction::Clip("anal_slow") if fast => Some("anal_fast"),
+        SocialAction::Clip("anal_fast") if !fast => Some("anal_slow"),
+        SocialAction::Clip("prone_doggy_soft") if fast && elapsed>=0.375 =>
+            Some("prone_doggy_hard1"),
+        SocialAction::Clip("prone_doggy_hard1"|"prone_doggy_hard2"|"prone_doggy_hard3")
+            if !fast => Some("prone_doggy_soft"),
+        SocialAction::Clip("prone_doggy_hard1") if elapsed>=0.625 =>
+            Some("prone_doggy_hard2"),
+        SocialAction::Clip("prone_doggy_hard2") if elapsed>=0.625 =>
+            Some("prone_doggy_hard3"),
+        SocialAction::Clip("prone_doggy_hard3") if elapsed>=0.625 =>
+            Some("prone_doggy_hard1"),
+        _=>None,
+    }
 }
 
-/// GeckoLib does not render every bone present in the .geo.json. The original
-/// Fapcraft model classes turn off unused armor/variants, and its renderer
-/// draws the `steve` player rig in a separate pass with the player's own skin.
-/// Rendering that second rig with a character sprite made giant, incorrectly
-/// textured heads and torsos overlap the actual character.
+fn social_pose(id: u32) -> Option<(SocialAction, f32)> {
+    let mut actions = SOCIAL.get()?.lock().unwrap_or_else(|p| p.into_inner());
+    let state = actions.get_mut(&id)?;
+    // No permanent lock if the player leaves unexpectedly.
+    if state.playlist.is_some() && state.session_started.elapsed().as_secs()>120 {
+        return None;
+    }
+    let duration = |key: &str| {
+        rigs().get(2).and_then(Option::as_ref)
+            .and_then(|rig| rig.actions.get(key))
+            .map_or(2.0, |clip| clip.duration.clamp(0.25, 12.0))
+    };
+    // Source e0.java: intro -> insert -> soft; Shift controls the
+    // fast loop, which has three separate hard clips. The old prototype
+    // jumped between just soft and hard1 and never exposed hard2/hard3.
+    // Jump requests the ending clip, not a jump of the avatar in place.
+    let current=state.started.elapsed().as_secs_f32();
+    let in_loop=matches!(state.action,SocialAction::Clip(
+        "anal_slow"|"anal_fast"|"prone_doggy_soft"
+        |"prone_doggy_hard1"|"prone_doggy_hard2"|"prone_doggy_hard3"
+    ));
+    if in_loop && BIA_FINISH_REQUEST.swap(false,Ordering::Relaxed) {
+        let ending=if matches!(state.action,SocialAction::Clip(name)
+            if name.starts_with("anal_")) {"anal_cum"}
+            else {"prone_doggy_cum"};
+        state.action=SocialAction::Clip(ending);
+        state.duration=duration(ending);
+        state.phase=state.playlist.map_or(0,|p|p.len().saturating_sub(1));
+        state.started=Instant::now();
+        return Some((state.action,0.0));
+    }
+    let fast=BIA_FAST.load(Ordering::Relaxed);
+    // e0.java uses GeckoLib keyframe events, not the declared clip length:
+    //   doggySwitch @ 0.375 in soft -> hard when Shift is held;
+    //   doggyReset  @ 0.625 in hard -> another hard variation.
+    // Every hard*.animation_length is 2.04167 s, but allowing it to
+    // finish made the Rust fast mode slower than Java and Ana.
+    let next_loop=bia_loop_followup(state.action,fast,current);
+    if let Some(next)=next_loop {
+        state.action=SocialAction::Clip(next);
+        state.duration=duration(next);
+        state.started=Instant::now();
+    }
+    if in_loop {
+        let elapsed=state.started.elapsed().as_secs_f32();
+        return Some((state.action,elapsed.rem_euclid(state.duration.max(0.001))));
+    }
+    let mut time = state.started.elapsed().as_secs_f32();
+    if matches!(state.action,SocialAction::Clip("anal_wait"|"sitdownidle")) {
+        return Some((state.action,time.rem_euclid(state.duration.max(0.001))));
+    }
+    if time >= state.duration {
+        let next = state.playlist.and_then(|items| items.get(state.phase + 1)).copied();
+        let Some(next) = next else {
+            // Source final clip has ended. Clear both actors' session to
+            // restore the mob's physics and the player's movement controls.
+            if state.playlist.is_some() {
+                actions.remove(&id);
+            }
+            return None
+        };
+        state.phase += 1;
+        state.action = SocialAction::Clip(next);
+        state.duration = duration(next);
+        state.started = Instant::now();
+        time = 0.0;
+    }
+    Some((state.action, time))
+}
+
+/// Exact categories used by Bia's decompiled e0.class
+/// SoundKeyframeEvent switch. Keyframes which are transitions rather than
+/// audio ('Done', 'Switch', etc.) intentionally emit no sound.
+fn bia_audio_categories(effect:&str)-> &'static [(&'static str,usize)] {
+    match effect {
+        "sitdownMSG1" | "headpatMSG1" | "talk_hornyMSG3"
+        | "talk_responseMSG2" => &[("girls.bia.breath",4)],
+        "stripMSG1" | "talk_hornyMSG2" | "talk_responseMSG3"
+        | "headpatMSG4" => &[("girls.bia.giggle",3)],
+        "talk_hornyMSG1" => &[("girls.bia.hey",4)],
+        "talk_hornyMSG4" | "talk_responseMSG1"
+        | "headpatMSG3" => &[("girls.bia.huh",3)],
+        "headpatMSG2" | "orgasm1" | "orgasm2" =>
+            &[("girls.bia.mmm",8)],
+        "anal_prepareMSG1" => &[("misc.plob",1)],
+        "anal_prepareMSG2" => &[("misc.bedrustle",2)],
+        "anal_startMSG1" => &[("girls.bia.mmm",8),("misc.pounding",36)],
+        "anal_startMSG2" | "anal_slowMSG1" | "anal_fastMSG1" =>
+            &[("misc.pounding",36),("girls.bia.ahh",8)],
+        "anal_cumMSG2" => &[("girls.bia.ahh",8)],
+        "slide" => &[("misc.slide",7)],
+        "pound" => &[("misc.pounding",36)],
+        "doggyMoan" => &[("girls.bia.ahh",8),("girls.bia.mmm",8)],
+        "cum" => &[("misc.inserts",5)],
+        _=>&[],
+    }
+}
+
+/// e0.class specifies a few exact sample indices instead of selecting
+/// randomly from the sounds. Keep these fixed for the source dialogue.
+fn bia_fixed_audio_index(effect:&str,base:&str)->Option<usize> {
+    match (effect,base) {
+        ("anal_startMSG1","girls.bia.mmm")=>Some(3),
+        ("anal_startMSG1","misc.pounding")=>Some(34),
+        ("anal_prepareMSG1","misc.plob")=>Some(0),
+        ("anal_prepareMSG2","misc.bedrustle")=>Some(0),
+        ("headpatMSG1","girls.bia.breath")=>Some(0),
+        ("headpatMSG2","girls.bia.mmm")=>Some(0),
+        ("headpatMSG3","girls.bia.huh")=>Some(0),
+        ("headpatMSG4","girls.bia.giggle")=>Some(1),
+        ("orgasm1","girls.bia.mmm")=>Some(6),
+        ("orgasm2","girls.bia.mmm")=>Some(7),
+        _=>None,
+    }
+}
+
+/// Queue time-aligned GeckoLib sound events once per *client* tick.
+/// The same social_pose clock advances Bia, her partner's skeleton and the
+/// audio cursor. Repeating clips wrap without double-playing a keyframe.
+/// Returns registered sound IDs for Game's own audio engine to play.
+pub(crate) fn take_bia_sound_events()->Vec<String> {
+    let Some(actions)=SOCIAL.get() else {return Vec::new()};
+    let ids:Vec<u32>={
+        let guard=actions.lock().unwrap_or_else(|e|e.into_inner());
+        guard.iter().filter(|(_,state)|state.kind=="bia")
+            .map(|(&id,_)|id).collect()
+    };
+    let mut emitted=Vec::new();
+    for id in ids {
+        let Some((SocialAction::Clip(name),time))=social_pose(id) else {continue};
+        let Some(clip)=rigs().get(2).and_then(Option::as_ref)
+            .and_then(|rig|rig.actions.get(name)) else {continue};
+        let mut guard=actions.lock().unwrap_or_else(|e|e.into_inner());
+        let Some(state)=guard.get_mut(&id) else {continue};
+        if state.sound_clip!=Some(name) {
+            state.sound_clip=Some(name);
+            state.sound_time=-1.0;
+        }
+        let previous=state.sound_time;
+        state.sound_time=time;
+        for cue in &clip.sound_cues {
+            let crossed=if time>=previous {
+                previous<cue.time && cue.time<=time
+            } else {
+                cue.time>previous || cue.time<=time
+            };
+            if !crossed {continue}
+            let categories=bia_audio_categories(&cue.effect);
+            // The Java doggyMoan cue randomly selects ONE of two voice
+            // categories, not both at once.
+            let groups=if cue.effect=="doggyMoan" {
+                let choice=(id as usize + state.sound_counter as usize)%2;
+                &categories[choice..choice+1]
+            } else {categories};
+            for &(base,variants) in groups {
+                let index=bia_fixed_audio_index(&cue.effect,base)
+                    .unwrap_or((id as usize + state.sound_counter as usize)%variants);
+                state.sound_counter=state.sound_counter.wrapping_add(1);
+                // Names exactly match the original JAR's sounds.json and
+                // the audio copied into Fapcraft 0.5.2.
+                let kind=base.rsplit('.').next().unwrap_or(base);
+                emitted.push(format!("sexmod:{base}.{kind}{index}"));
+            }
+        }
+    }
+    emitted
+}
+
+/// The active paired actor's NPC id. The original Java implementation
+/// moves the actual player and camera to its separate `steve` hierarchy.
+pub(crate) fn bia_active_actor() -> Option<u32> {
+    let active=SOCIAL.get()?;
+    let states=active.lock().unwrap_or_else(|e|e.into_inner());
+    states.iter().filter(|(_,state)|state.kind=="bia"
+        && state.playlist.is_some()
+        && state.session_started.elapsed().as_secs()<120)
+        .max_by_key(|(_,state)|state.session_started)
+        .map(|(&id,_)|id)
+}
+
+/// Replicate the exact transform order in `visit` for a Bedrock bone:
+/// animated translation, then Z/Y/X rotations around GeckoLib's pivot.
+fn bia_bone_matrix(
+    parent:glam::Mat4,bone:&Bone,clip:&Clip,time:f32
+) -> glam::Mat4 {
+    use glam::{Mat4,Vec3};
+    let channel=clip.bones.get(&bone.name);
+    let p=channel.map_or([0.0;3],|c|sample(&c.position,time,[0.0;3]));
+    let rot=channel.map_or([0.0;3],|c|sample(&c.rotation,time,[0.0;3]));
+    let deg=std::array::from_fn::<f32,3,_>(|i|(bone.rotation[i]+rot[i]).to_radians());
+    let pivot=Vec3::new(-bone.pivot[0]/16.0,bone.pivot[1]/16.0,
+        bone.pivot[2]/16.0);
+    parent*Mat4::from_translation(Vec3::new(-p[0]/16.0,p[1]/16.0,p[2]/16.0))
+        *Mat4::from_translation(pivot)
+        *Mat4::from_rotation_z(deg[2])
+        *Mat4::from_rotation_y(-deg[1])
+        *Mat4::from_rotation_x(-deg[0])
+        *Mat4::from_translation(-pivot)
+}
+
+/// Eye position of the Steve skeleton, relative to Bia's entity origin.
+/// This is sampled from the *same clip/time* as the visible Steve and Bia
+/// geometry, so the collision and POV do not remain at the old empty tile.
+pub(crate) fn bia_partner_eye_offset(id:u32,body_yaw:f32)->Option<[f64;3]> {
+    use glam::{Mat4,Vec3};
+    let (SocialAction::Clip(key),time)=social_pose(id)? else {return None};
+    if !paired_clip(key) {return None}
+    let rig=rigs().get(2)?.as_ref()?;
+    let clip=rig.actions.get(key)?;
+    let find=|name:&str|rig.bones.iter().find(|bone|bone.name==name);
+    let mut matrix=Mat4::from_rotation_y(
+        geckolib_model_yaw(body_yaw).to_radians()
+    );
+    for name in ["steve","Torso2","Head2"] {
+        matrix=bia_bone_matrix(matrix,find(name)?,clip,time);
+    }
+    let head=find("Head2")?;
+    // Head pivot is [0,24,-16] in original geometry. The player eye is
+    // about 0.11 blocks above the pivot; account for the head animation.
+    let eye=matrix.transform_point3(Vec3::new(
+        -head.pivot[0]/16.0,head.pivot[1]/16.0+0.11,
+        head.pivot[2]/16.0));
+    eye.is_finite().then_some([f64::from(eye.x),f64::from(eye.y),
+        f64::from(eye.z)])
+}
+
+/// The original source animates two sets of arms. Use the GeckoLib
+/// partner arm channels for the actual POV hand meshes as well, so the
+/// first-person camera does not keep playing vanilla idle arm motion.
+/// Third person still draws the complete Steve hierarchy.
+pub(crate) fn bia_pov_hand_rotations()->Option<[[f32;3];2]> {
+    if !BIA_FIRST_PERSON.load(Ordering::Relaxed) {return None}
+    let id={
+        let actions=SOCIAL.get()?;
+        let states=actions.lock().unwrap_or_else(|e|e.into_inner());
+        *states.iter().find(|(_,state)|state.kind=="bia"
+            && state.playlist.is_some()
+            && state.session_started.elapsed().as_secs()<120)?.0
+    };
+    let (SocialAction::Clip(name),time)=social_pose(id)? else {return None};
+    if !paired_clip(name) {return None}
+    let clip=rigs().get(2).and_then(Option::as_ref)
+        .and_then(|rig|rig.actions.get(name))?;
+    let angles=|bone:&str| {
+        let degrees=clip.bones.get(bone)
+            .map_or([0.0;3],|channels|
+                sample(&channels.rotation,time,[0.0;3]));
+        [degrees[0].to_radians(),degrees[1].to_radians(),
+            degrees[2].to_radians()]
+    };
+    Some([angles("RightArm"),angles("LeftArm")])
+}
+
+/// Model variants must be rendered in separate passes with separate
+/// textures: see original d_.java and cv.java. The original 'steve' subtree
+/// cannot use Bia's brown 64x64 atlas, or its face/arms become mistextured.
 fn hidden_in_default_character_pose(name: &str) -> bool {
     name == "steve"
         || name == "items"
@@ -219,10 +670,39 @@ fn bedrock_uv(u: f32, v: f32, du: f32, dv: f32, width: f32, height: f32) -> Opti
           (u + du) * 16.0 / width, (v + dv) * 16.0 / height])
 }
 
+/// Bedrock/GeckoLib allows tiny Molang-style numeric expressions in
+/// vector components. The source contains e.g. "22.42-8", "2.7-8" and
+/// "-97.0283+easeInOutSine". serde_json::Value::as_f64 returns None for
+/// these strings; defaulting them to zero separated the paired rig (Ana).
+/// Evaluate only finite sums/differences of literals; an optional +ease...
+/// marker is animation metadata, NOT an arithmetic term or executable code.
+fn bedrock_number(value:&Value, fallback:f32)->f32 {
+    if let Some(n)=value.as_f64() {
+        return if n.is_finite(){n as f32}else{fallback}
+    }
+    let Some(raw)=value.as_str() else {return fallback};
+    let expr=raw.split("+ease").next().unwrap_or(raw).trim();
+    if let Ok(n)=expr.parse::<f32>() {
+        return if n.is_finite(){n}else{fallback}
+    }
+    let bytes=expr.as_bytes();
+    let mut total=0.0_f32;
+    let mut start=0usize;
+    for i in 1..=bytes.len() {
+        let boundary=i==bytes.len() || bytes[i]==b'+' || bytes[i]==b'-';
+        if !boundary {continue}
+        let part=expr[start..i].trim();
+        let Ok(value)=part.parse::<f32>() else {return fallback};
+        if !value.is_finite(){return fallback}
+        total+=value;
+        start=i;
+    }
+    if total.is_finite(){total}else{fallback}
+}
 fn triplet(v: Option<&Value>, default: [f32; 3]) -> [f32; 3] {
     let Some(array) = v.and_then(Value::as_array) else { return default };
     if array.len() < 3 { return default; }
-    std::array::from_fn(|i| array[i].as_f64().unwrap_or(default[i] as f64) as f32)
+    std::array::from_fn(|i|bedrock_number(&array[i],default[i]))
 }
 fn parse_track(value: Option<&Value>) -> Vec<Key> {
     let Some(value) = value else { return Vec::new() };
@@ -278,7 +758,20 @@ fn clip(source: &Value, alias: &str, suffix: &str) -> Option<Clip> {
             scale: parse_track(data.get("scale")),
         });
     }
-    Some(Clip { duration: duration.max(0.001), bones })
+    // Forge registers GeckoLib's SoundKeyframeEvent; the old port ignored
+    // the entire sound_effects track, so voices were silent even when their
+    // original .ogg files were installed.
+    let mut sound_cues=Vec::new();
+    if let Some(effects)=v.get("sound_effects").and_then(Value::as_object) {
+        for (at,event) in effects {
+            if let (Ok(time),Some(effect))=(at.parse::<f32>(),
+                event.get("effect").and_then(Value::as_str)) {
+                sound_cues.push(SoundCue{time,effect:effect.to_owned()});
+            }
+        }
+        sound_cues.sort_by(|a,b|a.time.total_cmp(&b.time));
+    }
+    Some(Clip { duration: duration.max(0.001), bones, sound_cues })
 }
 /// GeckoLib EasingType definitions as used by the original Bedrock
 /// animations. In particular, the headpat and hug clips need Back, Quart
@@ -358,14 +851,14 @@ fn sample(keys: &[Key], time: f32, default: [f32; 3]) -> [f32; 3] {
     }
     keys.last().map_or(default, |k| k.value)
 }
-fn load_rig(zip: &mut zip::ZipArchive<File>, character: &Character) -> Result<Rig, String> {
+fn load_rig_variant(zip: &mut zip::ZipArchive<File>, character: &Character, geometry_path: &str) -> Result<Rig, String> {
     fn json(zip: &mut zip::ZipArchive<File>, name: &str) -> Result<Value, String> {
         let mut text = String::new();
         zip.by_name(name).map_err(|e| format!("{name}: {e}"))?
             .read_to_string(&mut text).map_err(|e| format!("{name}: {e}"))?;
         serde_json::from_str(&text).map_err(|e| format!("{name}: {e}"))
     }
-    let geometry = json(zip, &format!("assets/sexmod/{}", character.geo))?;
+    let geometry = json(zip, &format!("assets/sexmod/{geometry_path}"))?;
     let anim = json(zip, &format!("assets/sexmod/{}", character.animation))?;
     let obj = geometry.get("minecraft:geometry").and_then(Value::as_array)
         .and_then(|a| a.first()).ok_or("No minecraft:geometry in original asset")?;
@@ -433,12 +926,34 @@ fn load_rig(zip: &mut zip::ZipArchive<File>, character: &Character) -> Result<Ri
         "summon_normal","rich_normal","summon","sleep",
         "blink","jump_1","stand_up","give_coin","boost",
         "controlled_flight","angry_face","running","walk",
+        // Bia's source state machine (e0.java): conversation, costume and
+        // first/continuation clips. Retain each original animation key.
+        "talk_horny","talk_horny2","talk_response","strip",
+        "anal_prepare","anal_wait","anal_start","anal_slow","anal_fast","anal_cum",
+        "prone_doggy_intro","prone_doggy_insert","prone_doggy_soft",
+        "prone_doggy_hard1","prone_doggy_hard2","prone_doggy_hard3",
+        "prone_doggy_cum","wave_idle",
     ] {
         if let Some(found) = clip(&anim, character.alias, suffix) {
-            actions.insert(suffix, found);
+            actions.insert(suffix.to_owned(), found);
         }
     }
-    Ok(Rig { sprite:format!("sexmod:entity/fapcraft_native/{}", character.id),bones,roots,actions,
+    // Do not silently omit original character clips merely because they were
+    // not in the old demo buttons. Bia includes 41 source animations.
+    if character.id == "bia" {
+        if let Some(entries) = anim.get("animations").and_then(Value::as_object) {
+            for key in entries.keys() {
+                if let Some(suffix) = key.strip_prefix("animation.bia.") {
+                    if !actions.contains_key(suffix) {
+                        if let Some(found) = clip(&anim, character.alias, suffix) {
+                            actions.insert(suffix.to_owned(), found);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(Rig { sprite:format!("sexmod:entity/fapcraft_native/{}", character.id),bones,roots,nude:None,actions,
         idle:clip(&anim, character.alias,"idle")
             .or_else(||clip(&anim, character.alias,"summon_wait"))
             .or_else(||clip(&anim, character.alias,"rich_normal")),
@@ -453,6 +968,24 @@ fn load_rig(zip: &mut zip::ZipArchive<File>, character: &Character) -> Result<Ri
         headpat:clip(&anim, character.alias,"headpat")
             .or_else(||clip(&anim, character.alias,"head_pat")),
     })
+}
+
+fn load_rig(zip: &mut zip::ZipArchive<File>, character: &Character) -> Result<Rig, String> {
+    let mut rig = load_rig_variant(zip, character, character.geo)?;
+    if character.id == "bia" {
+        let nude=load_rig_variant(zip,character,"geo/bia/bianude.geo.json")?;
+        // In the original source the pillow belongs to the alternate Bia
+        // geometry. Bring that single original bone into the dressed rig so
+        // anal_prepare/anal_wait can show it without changing her outfit.
+        if let Some(pillow)=nude.bones.iter().find(|b|b.name=="pillow") {
+            let mut pillow=pillow.clone();
+            pillow.children.clear();
+            rig.roots.push(rig.bones.len());
+            rig.bones.push(pillow);
+        }
+        rig.nude=Some(Box::new(nude));
+    }
+    Ok(rig)
 }
 
 static RIGS: OnceLock<Vec<Option<Rig>>> = OnceLock::new();
@@ -518,12 +1051,18 @@ fn gecko_face(c: &BoxGeometry, direction: usize) -> [[f32;3];4] {
     // native_draw_quad requires top-left, bottom-left, bottom-right, top-right.
     [p[indices[1]], p[indices[2]], p[indices[3]], p[indices[0]]]
 }
-fn visit(rig: &Rig, index: usize, clip: Option<&Clip>, time: f32, draw:&mut dyn BlockEntityDrawContext, depth: usize) {
+fn visit(rig: &Rig, index: usize, clip: Option<&Clip>, time: f32, draw:&mut dyn BlockEntityDrawContext, depth: usize, show_pillow: bool, player_pass: bool, sprite: &str) {
     if depth > 64 {return;}
     let Some(bone)=rig.bones.get(index) else {return;};
     // The Java cv/d_ renderers hide entire alternate bone subtrees. In
     // particular the Steve player-model pass requires a different skin.
-    if hidden_in_default_character_pose(&bone.name) { return; }
+    if player_pass {
+        // Java cv.java chooses Steve or Alex arm geometry, never both.
+        if bone.name.ends_with("Alex") || bone.name=="items" {return}
+    } else if hidden_in_default_character_pose(&bone.name)
+        || (bone.name=="pillow" && !show_pillow) {
+        return;
+    }
     draw.push();
     let channels=clip.and_then(|c|c.bones.get(&bone.name));
     if let Some(c)=channels {
@@ -550,11 +1089,11 @@ fn visit(rig: &Rig, index: usize, clip: Option<&Clip>, time: f32, draw:&mut dyn 
         for (direction, rect) in c.uv.iter().enumerate() {
             let Some([u0,v0,u1,v1]) = rect else {continue;};
             let uv = if c.flip_uv {[*u1,*v0,*u0,*v1]} else {[*u0,*v0,*u1,*v1]};
-            let _=draw.quad(&rig.sprite,gecko_face(c,direction),uv,0xFFFFFF);
+            let _=draw.quad(sprite,gecko_face(c,direction),uv,0xFFFFFF);
         }
         draw.pop();
     }
-    for child in &bone.children {visit(rig,*child,clip,time,draw,depth+1);}
+    for child in &bone.children {visit(rig,*child,clip,time,draw,depth+1,show_pillow,player_pass,sprite);}
     draw.pop();
 }
 
@@ -572,11 +1111,17 @@ impl EntityRenderer for Renderer {
             // returning Ok without geometry avoids rendering a wrong vanilla model.
             return Ok(());
         };
+        let rig = if self.0 == 2 && bia_undressed(entity.id) {
+            rig.nude.as_deref().unwrap_or(rig)
+        } else { rig };
         let speed=entity.living.map_or(0.0,|l|l.walk_animation_speed);
         let movement_clip=if speed>0.60 {rig.run.as_ref().or(rig.walk.as_ref())}
             else if speed>0.055 {rig.walk.as_ref().or(rig.run.as_ref())}
             else {rig.idle.as_ref()};
-        let social=social_pose(entity.id).and_then(|(action, seconds)|{
+        let social_state=social_pose(entity.id);
+        let show_pillow=matches!(social_state,
+            Some((SocialAction::Clip(name),_)) if name.starts_with("anal_"));
+        let social=social_state.and_then(|(action, seconds)|{
             let clip=match action {
                 SocialAction::Talk=>rig.talk.as_ref(),
                 SocialAction::Headpat=>rig.headpat.as_ref(),
@@ -600,7 +1145,23 @@ impl EntityRenderer for Renderer {
             draw.scale([living.scale,living.scale,living.scale]);
             if living.death_time>0.0 {draw.rotate_about([0.0,0.0,1.0],(living.death_time*4.5).min(90.0),[0.0,0.6,0.0]);}
         } else {draw.rotate_about([0.0,1.0,0.0],geckolib_model_yaw(entity.yaw),[0.0;3]);}
-        for root in &rig.roots {visit(rig,*root,clip,time,draw,0);}
+        for root in &rig.roots {
+            visit(rig,*root,clip,time,draw,0,show_pillow,false,&rig.sprite);
+        }
+        // The vanilla Forge renderer d_.java performs a second, player-skin
+        // textured traversal of its geobone 'steve'. The joint animation
+        // channels are the SAME Clip and time as Bia; previous Rust releases
+        // silently discarded this subtree and only posed loose player arms.
+        // Hide this embedded mesh in POV so the normal first-person controls
+        // and animated arms remain unobstructed. F5 may freely change view.
+        if self.0==2 && social_state.is_some_and(|(action,_)|
+            matches!(action,SocialAction::Clip(name) if paired_clip(name)))
+            && !BIA_FIRST_PERSON.load(Ordering::Relaxed) {
+            if let Some(steve)=rig.bones.iter().position(|bone|bone.name=="steve") {
+                visit(rig,steve,clip,time,draw,0,false,true,
+                    "sexmod:player/steve");
+            }
+        }
         draw.pop();
         Ok(())
     }
@@ -617,6 +1178,101 @@ pub(super) fn install(registry: &mut dyn EntityRenderers) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn partner_transform_keeps_original_geo_pivot() {
+        let clip=Clip{duration:1.0,bones:HashMap::new(),sound_cues:vec![]};
+        let bone=Bone{name:"Head2".into(),pivot:[0.0,24.0,-16.0],
+            rotation:[0.0;3],children:vec![],cubes:vec![]};
+        let position=bia_bone_matrix(glam::Mat4::IDENTITY,&bone,&clip,0.0)
+            .transform_point3(glam::Vec3::new(0.0,1.5,-1.0));
+        assert!((position-glam::Vec3::new(0.0,1.5,-1.0)).length()<1e-5);
+    }
+    #[test]
+    fn original_bia_molang_expressions_are_not_zeroed() {
+        assert!((bedrock_number(&serde_json::json!("22.42-8"),0.0)-14.42).abs()<0.0001);
+        assert!((bedrock_number(&serde_json::json!("2.7-8"),0.0)+5.3).abs()<0.0001);
+        assert!((bedrock_number(&serde_json::json!("-15.7+5.12"),0.0)+10.58).abs()<0.0001);
+        assert!((bedrock_number(&serde_json::json!("-97.0283+easeInOutSine"),0.0)+97.0283).abs()<0.0001);
+        assert_eq!(bedrock_number(&serde_json::json!("invalid"),42.0),42.0);
+    }
+    #[test]
+    fn bia_voices_follow_original_keyframe_categories() {
+        assert_eq!(bia_audio_categories("sitdownMSG1"),&[("girls.bia.breath",4)]);
+        assert_eq!(bia_audio_categories("doggyMoan").len(),2);
+        assert_eq!(bia_audio_categories("anal_fastMSG1").len(),2);
+        assert_eq!(bia_fixed_audio_index("anal_startMSG1","girls.bia.mmm"),Some(3));
+        assert!(bia_audio_categories("doggyReset").is_empty());
+        let parsed=clip(&serde_json::json!({"animations":{"animation.bia.test":{
+            "animation_length":2.0,"bones":{},"sound_effects":{
+                "0.25":{"effect":"sitdownMSG1"},"1.2":{"effect":"pound"}
+            }
+        }}}),"bia","test").unwrap();
+        assert_eq!(parsed.sound_cues.len(),2);
+        assert_eq!(parsed.sound_cues[0].effect,"sitdownMSG1");
+    }
+    #[test]
+    fn bia_camera_and_jump_input_are_explicit() {
+        set_bia_first_person(true);
+        assert!(BIA_FIRST_PERSON.load(Ordering::Relaxed));
+        set_bia_first_person(false);
+        assert!(!BIA_FIRST_PERSON.load(Ordering::Relaxed));
+        set_bia_jump(false);
+        assert!(!BIA_JUMP_HELD.load(Ordering::Relaxed));
+    }
+    #[test]
+    fn doggy_shift_switches_at_geckolib_cues_not_animation_end() {
+        assert_eq!(bia_loop_followup(SocialAction::Clip("prone_doggy_soft"),
+            true,0.374),None);
+        assert_eq!(bia_loop_followup(SocialAction::Clip("prone_doggy_soft"),
+            true,0.375),Some("prone_doggy_hard1"));
+        assert_eq!(bia_loop_followup(SocialAction::Clip("prone_doggy_hard1"),
+            true,0.624),None);
+        assert_eq!(bia_loop_followup(SocialAction::Clip("prone_doggy_hard1"),
+            true,0.625),Some("prone_doggy_hard2"));
+        assert_eq!(bia_loop_followup(SocialAction::Clip("prone_doggy_hard2"),
+            true,0.625),Some("prone_doggy_hard3"));
+        assert_eq!(bia_loop_followup(SocialAction::Clip("prone_doggy_hard3"),
+            false,0.010),Some("prone_doggy_soft"));
+        assert_eq!(bia_loop_followup(SocialAction::Clip("anal_slow"),
+            true,0.001),Some("anal_fast"));
+    }
+    #[test]
+    fn bia_keyframe_timings_match_original_assets() {
+        let rig=rigs().get(2).and_then(Option::as_ref);
+        if let Some(rig)=rig {
+            let soft=rig.actions.get("prone_doggy_soft").unwrap();
+            let hard=rig.actions.get("prone_doggy_hard1").unwrap();
+            assert!(soft.sound_cues.iter().any(|cue|
+                cue.effect=="doggySwitch" && (cue.time-0.375).abs()<0.001));
+            assert!(hard.sound_cues.iter().any(|cue|
+                cue.effect=="doggyReset" && (cue.time-0.625).abs()<0.001));
+            assert!(hard.duration>0.625);
+        }
+    }
+    #[test]
+    fn bia_fast_toggle_is_explicit() {
+        set_bia_fast(true);
+        assert!(BIA_FAST.load(Ordering::Relaxed));
+        set_bia_fast(false);
+        assert!(!BIA_FAST.load(Ordering::Relaxed));
+    }
+    #[test]
+    fn bia_original_sequences_have_mapped_start_and_end() {
+        assert_eq!(BIA_DOGGY.first().copied(), Some("prone_doggy_intro"));
+        assert_eq!(BIA_DOGGY.last().copied(), Some("prone_doggy_cum"));
+        assert_eq!(BIA_ANA.first().copied(), Some("anal_start"));
+        assert_eq!(BIA_ANA.last().copied(), Some("anal_cum"));
+        assert!(!trigger_bia_sequence(17, "other"));
+    }
+    #[test]
+    fn bia_outfit_switches_independently_by_entity() {
+        const BIA_TEST_ENTITY: u32 = u32::MAX - 27;
+        assert!(!bia_undressed(BIA_TEST_ENTITY));
+        assert_eq!(toggle_bia_dress(BIA_TEST_ENTITY),Some(true));
+        assert!(!bia_undressed(BIA_TEST_ENTITY));
+        // The cue must finish before a second wardrobe request is accepted.
+        assert_eq!(toggle_bia_dress(BIA_TEST_ENTITY),None);
+    }
     #[test]
     fn social_clips_selected_without_changing_locomotion_when_absent() {
         assert_eq!(CHARACTERS.len(),11);

@@ -391,6 +391,22 @@ impl Game<'_> {
                 (!hit.miss).then_some([hit.hit.location.x, hit.hit.location.y, hit.hit.location.z])
             },
         );
+        // GeckoLib's animated Steve is the actual POV viewpoint of Bia's
+        // paired scene, not an independent NPC behind the normal camera.
+        // Keep vanilla orbit/spectator handling when the user switches back
+        // to third person; only first-person is anchored to this head.
+        if kind.is_first_person()
+            && let Some(id)=super::fapcraft_native::bia_active_actor()
+            && let Some(mob)=self.mobs.iter().find(|m|m.id==id && !m.removed)
+            && let Some(local)=super::fapcraft_native::bia_partner_eye_offset(
+                id,mob.body_yaw)
+        {
+            view.position=[
+                mob.position.x+local[0],
+                mob.position.y+local[1],
+                mob.position.z+local[2],
+            ];
+        }
         self.view = view;
         Some((
             glam::DVec3::from_array(view.position),
