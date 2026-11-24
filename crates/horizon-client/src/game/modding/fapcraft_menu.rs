@@ -290,60 +290,82 @@ fn button_rect(x:f32,y:f32,w:f32,i:usize)->(f32,f32,f32,f32) {
     (x+12.0,y+44.0+i as f32*24.0,w-24.0,20.0)
 }
 
-// A paired scene has one authoritative physical placement. The animated
-// Steve head is a *rendered bone*, not a valid collision/body transform: moving
-// the player to that bone on every tick made Minecraft's collision and server
-// reconciliation repeatedly teleport the camera and avatar.
-static BIA_PLAYER_PLACED: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
-fn bia_player_placed() -> &'static Mutex<Option<u32>> {
-    BIA_PLAYER_PLACED.get_or_init(||Mutex::new(None))
+// Unlike the render-only Steve head, the player's collision box cannot move
+// on every GeckoLib keyframe. Retain one stable anchor during the paired
+// interaction and release it when the sequence ends.
+static BIA_PLAYER_ANCHOR: OnceLock<Mutex<Option<(u32,[f64;3])>>> = OnceLock::new();
+fn bia_player_anchor() -> &'static Mutex<Option<(u32,[f64;3])>> {
+    BIA_PLAYER_ANCHOR.get_or_init(||Mutex::new(None))
 }
 impl Game<'_> {
-    /// Place the physical player only once per scene. The head of Steve
-    /// animates every frame and must affect POV *rendering*, not world
-    /// collisions or the network-authoritative player body.
+    /// Attach the player's physical body to Steve's *fixed scene position*,
+    /// not his moving head, preventing both collision jitter and free-roam
+    /// while the scene plays. The POV renderer follows the animated head.
     pub(in crate::game) fn fapcraft_bia_attach_player_to_steve(&mut self) {
         use horizon_core::geometry::Vec3;
         use horizon_world::level::LevelAccess;
-        let actor=super::fapcraft_native::bia_active_actor();
-        let should_place={
-            let mut last=bia_player_placed().lock()
+
+        let Some(id)=super::fapcraft_native::bia_active_actor() else {
+            *bia_player_anchor().lock().unwrap_or_else(|e|e.into_inner())=None;
+            return
+        };
+        let Some(current)=self.player.as_ref() else {return};
+        let current_pos=current.position;
+        let eye_height=f64::from(current.dimensions.eye_height);
+        let candidate=self.mobs.iter().find(|mob|mob.id==id && !mob.removed)
+            .and_then(|mob|{
+                let local=super::fapcraft_native::bia_partner_eye_offset(
+                    id,mob.body_yaw)?;
+                Some(Vec3::new(mob.position.x+local[0],
+                    mob.position.y+local[1]-eye_height,
+                    mob.position.z+local[2]))
+            });
+
+        // Reject invalid placements and use the safe starting tile if
+        // Steve's rig is inside a world block. A low bed is non-full but
+        // occupies its whole block ID: place feet on the bed's 9/16 top.
+        let target=candidate.and_then(|mut pos|{
+            if !pos.x.is_finite() || !pos.y.is_finite()
+                || !pos.z.is_finite() {return None}
+            let x=pos.x.floor() as i32;
+            let z=pos.z.floor() as i32;
+            if !self.world.loaded(x,z) {return None}
+            let y=pos.y.floor() as i32;
+            let feet=self.world.block(x,y,z);
+            let obstacle=self.res.facts().get(feet).name.as_str();
+            if obstacle.ends_with("_bed") {
+                pos.y=pos.y.max(f64::from(y)+9.0/16.0);
+            } else if feet.0!=0 {
+                return None
+            }
+            let top=self.world.block(x,pos.y.floor() as i32+1,z);
+            if top.0!=0 {return None}
+            Some(pos)
+        }).unwrap_or(current_pos);
+        let (at,first)={
+            let mut held=bia_player_anchor().lock()
                 .unwrap_or_else(|e|e.into_inner());
-            if *last==actor {false}
-            else {
-                *last=actor;
-                actor.is_some()
+            match *held {
+                Some((which,location)) if which==id => (location,false),
+                _=>{
+                    let location=[target.x,target.y,target.z];
+                    *held=Some((id,location));
+                    (location,true)
+                }
             }
         };
-        if !should_place {return}
-        let Some(id)=actor else {return};
-        let Some(mob)=self.mobs.iter().find(|m|m.id==id && !m.removed)
-            else {return};
-        let Some(offset)=super::fapcraft_native::bia_partner_eye_offset(
-            id,mob.body_yaw) else {return};
-        let Some(current)=self.player.as_ref() else {return};
-        let pos=Vec3::new(mob.position.x+offset[0],
-            mob.position.y+offset[1]-f64::from(current.dimensions.eye_height),
-            mob.position.z+offset[2]);
-        if !pos.x.is_finite() || !pos.y.is_finite() || !pos.z.is_finite() {
-            return
+        let pos=Vec3::new(at[0],at[1],at[2]);
+        if let Some(player)=self.player.as_mut() {
+            // Cancel normal walking/falling/jumping drift after simulation.
+            // No per-frame animation translation is applied to collision.
+            player.position=pos;
+            player.velocity=Vec3::ZERO;
+            if first {
+                player.teleported=true;
+                player.teleported_delta=[false;3];
+            }
+            self.previous_position=pos;
         }
-        // Preserve the safe starting tile if Steve's animated bone is
-        // inside a bed, the floor, or an unloaded chunk. Never teleport
-        // repeatedly trying to follow the head at subsequent clip changes.
-        let (x,y,z)=(pos.x.floor() as i32,pos.y.floor() as i32,
-            pos.z.floor() as i32);
-        if !self.world.loaded(x,z) || self.world.block(x,y,z).0!=0
-            || self.world.block(x,y+1,z).0!=0
-            || self.world.block(x,y-1,z).0==0 {
-            return
-        }
-        let Some(player)=self.player.as_mut() else {return};
-        player.position=pos;
-        player.velocity=Vec3::ZERO;
-        player.teleported=true;
-        player.teleported_delta=[false;3];
-        self.previous_position=pos;
     }
 
     /// Play only real, registered audio cues from GeckoLib's timeline.
