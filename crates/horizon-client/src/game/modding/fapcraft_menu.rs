@@ -332,8 +332,7 @@ impl Game<'_> {
             if !self.world.loaded(x,z) {return None}
             let y=pos.y.floor() as i32;
             let feet=self.world.block(x,y,z);
-            let obstacle=self.res.facts().get(feet).name.as_str();
-            if obstacle.ends_with("_bed") {
+            if self.res.facts().get(feet).name.ends_with("_bed") {
                 pos.y=pos.y.max(f64::from(y)+9.0/16.0);
             } else if feet.0!=0 {
                 return None
