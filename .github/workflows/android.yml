@@ -1,5 +1,5 @@
 name: android
-# All four Starling APKs, on GitHub's runners: branch pushes and pull requests build each ABI and keep it
+# Fapcraft ARM64 test APK: branch pushes and pull requests compile only arm64-v8a and keep it
 # as an artifact, signed with the debug key in STARLING_DEBUG_KEYSTORE_BASE64 so one installs over another (a
 # throwaway key where that secret is missing, as in a fork's pull request). A tag v* signs it with the release key held
 # in the secrets of the `release` environment (STARLING_KEYSTORE_BASE64, STARLING_KEY_ALIAS, STARLING_STORE_PASSWORD,
