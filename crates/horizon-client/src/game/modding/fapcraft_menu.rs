@@ -263,33 +263,59 @@ fn button_rect(x:f32,y:f32,w:f32,i:usize)->(f32,f32,f32,f32) {
     (x+12.0,y+44.0+i as f32*24.0,w-24.0,20.0)
 }
 
+// A paired scene has one authoritative physical placement. The animated
+// Steve head is a *rendered bone*, not a valid collision/body transform: moving
+// the player to that bone on every tick made Minecraft's collision and server
+// reconciliation repeatedly teleport the camera and avatar.
+static BIA_PLAYER_PLACED: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
+fn bia_player_placed() -> &'static Mutex<Option<u32>> {
+    BIA_PLAYER_PLACED.get_or_init(||Mutex::new(None))
+}
 impl Game<'_> {
-    /// Anchor the real local player's collision box to the original Steve
-    /// head hierarchy while a paired scene runs. The previous prototype
-    /// only animated a second Steve model while leaving the player at a
-    /// safe *nearby* block, which created a second collision outline and
-    /// a camera from the wrong location. One authoritative local position
-    /// is now used by both collision and the first-person camera.
+    /// Place the physical player only once per scene. The head of Steve
+    /// animates every frame and must affect POV *rendering*, not world
+    /// collisions or the network-authoritative player body.
     pub(in crate::game) fn fapcraft_bia_attach_player_to_steve(&mut self) {
         use horizon_core::geometry::Vec3;
-        let Some(id)=super::fapcraft_native::bia_active_actor() else {return};
+        use horizon_world::level::LevelAccess;
+        let actor=super::fapcraft_native::bia_active_actor();
+        let should_place={
+            let mut last=bia_player_placed().lock()
+                .unwrap_or_else(|e|e.into_inner());
+            if *last==actor {false}
+            else {
+                *last=actor;
+                actor.is_some()
+            }
+        };
+        if !should_place {return}
+        let Some(id)=actor else {return};
         let Some(mob)=self.mobs.iter().find(|m|m.id==id && !m.removed)
             else {return};
-        let Some(local)=super::fapcraft_native::bia_partner_eye_offset(id,mob.body_yaw)
-            else {return};
-        let Some(player)=self.player.as_mut() else {return};
-        let eye_height=f64::from(player.dimensions.eye_height);
-        let pos=Vec3::new(mob.position.x+local[0],
-            mob.position.y+local[1]-eye_height,
-            mob.position.z+local[2]);
+        let Some(offset)=super::fapcraft_native::bia_partner_eye_offset(
+            id,mob.body_yaw) else {return};
+        let Some(current)=self.player.as_ref() else {return};
+        let pos=Vec3::new(mob.position.x+offset[0],
+            mob.position.y+offset[1]-f64::from(current.dimensions.eye_height),
+            mob.position.z+offset[2]);
         if !pos.x.is_finite() || !pos.y.is_finite() || !pos.z.is_finite() {
-            return;
+            return
         }
-        // Paired actions own the actor movement for their duration. Avoid
-        // accumulating collision/gravity velocity that would desynchronize
-        // the camera from the sampled head at the next simulation tick.
+        // Preserve the safe starting tile if Steve's animated bone is
+        // inside a bed, the floor, or an unloaded chunk. Never teleport
+        // repeatedly trying to follow the head at subsequent clip changes.
+        let (x,y,z)=(pos.x.floor() as i32,pos.y.floor() as i32,
+            pos.z.floor() as i32);
+        if !self.world.loaded(x,z) || self.world.block(x,y,z).0!=0
+            || self.world.block(x,y+1,z).0!=0
+            || self.world.block(x,y-1,z).0==0 {
+            return
+        }
+        let Some(player)=self.player.as_mut() else {return};
         player.position=pos;
         player.velocity=Vec3::ZERO;
+        player.teleported=true;
+        player.teleported_delta=[false;3];
         self.previous_position=pos;
     }
 
