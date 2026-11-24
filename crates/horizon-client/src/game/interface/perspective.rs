@@ -286,7 +286,13 @@ impl Game<'_> {
         self.apply_requested_camera_type();
         let previous = self.camera_type;
         let mut next = previous.cycle();
-        self.native_camera_type_cycle(previous, &mut next);
+        // Preserve vanilla's full FirstPerson -> ThirdPersonBack ->
+        // ThirdPersonFront rotation inside a paired scene. An external
+        // camera-type-cycle hook can remove FirstPerson from the sequence,
+        // which made POV impossible despite the one-shot camera request.
+        if !super::fapcraft_native::bia_session_active() {
+            self.native_camera_type_cycle(previous, &mut next);
+        }
         self.apply_camera_type(next);
     }
     /// `Options.setCameraType`, then `Minecraft.handleKeybinds`' check: the chain
@@ -330,6 +336,24 @@ impl Game<'_> {
             ),
             None => {
                 let mut entity = self.player_camera_entity()?;
+                if self.camera_type.is_first_person()
+                    && let Some(id)=super::fapcraft_native::bia_active_actor()
+                    && let Some(mob)=self.mobs.iter().find(|m|m.id==id && !m.removed)
+                    && let Some(local)=super::fapcraft_native::bia_partner_eye_offset(
+                        id,mob.body_yaw)
+                {
+                    // Camera.update expects the *feet* coordinate and adds
+                    // eye_height itself. Supply the animated Steve head as
+                    // a synthetic camera entity, never as LocalPlayer's
+                    // physics/collision position. This keeps View.eye,
+                    // View.position and interpolation in the same space.
+                    entity.position=[
+                        mob.position.x+local[0],
+                        mob.position.y+local[1]-f64::from(entity.eye_height),
+                        mob.position.z+local[2],
+                    ];
+                    entity.previous=entity.position;
+                }
                 if let Some(position) = self.remote_minecart_rider_position(partial) {
                     // Already evaluated at partial: do not linearly interpolate
                     // between tick endpoints across a corner a second time.
@@ -391,22 +415,9 @@ impl Game<'_> {
                 (!hit.miss).then_some([hit.hit.location.x, hit.hit.location.y, hit.hit.location.z])
             },
         );
-        // GeckoLib's animated Steve is the actual POV viewpoint of Bia's
-        // paired scene, not an independent NPC behind the normal camera.
-        // Keep vanilla orbit/spectator handling when the user switches back
-        // to third person; only first-person is anchored to this head.
-        if kind.is_first_person()
-            && let Some(id)=super::fapcraft_native::bia_active_actor()
-            && let Some(mob)=self.mobs.iter().find(|m|m.id==id && !m.removed)
-            && let Some(local)=super::fapcraft_native::bia_partner_eye_offset(
-                id,mob.body_yaw)
-        {
-            view.position=[
-                mob.position.x+local[0],
-                mob.position.y+local[1],
-                mob.position.z+local[2],
-            ];
-        }
+        // view.align_with_entity_distance has already applied the
+        // animated head offset above, keeping View.eye in sync for all
+        // first-person render paths. Do not mutate view.position again.
         self.view = view;
         Some((
             glam::DVec3::from_array(view.position),
