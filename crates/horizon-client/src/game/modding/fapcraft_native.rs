@@ -511,21 +511,47 @@ fn bia_fixed_audio_index(effect:&str,base:&str)->Option<usize> {
     }
 }
 
+/// Exact registered sound IDs from 0.5.3's source-audited catalog.
+/// Only name-matched *acoustic* keyframes are mapped for other characters;
+/// keyframes such as transition Done/Ready/BlackScreen stay silent here.
+static ORIGINAL_AUDIO_MAP: OnceLock<HashMap<String,HashMap<String,Vec<String>>>> = OnceLock::new();
+fn original_audio_map()->&'static HashMap<String,HashMap<String,Vec<String>>> {
+    ORIGINAL_AUDIO_MAP.get_or_init(||{
+        let home=std::env::var_os("HORIZON_HOME").map(PathBuf::from)
+            .unwrap_or_default();
+        let path=home.join("horizon-mods/sexmod.hmod");
+        let result=(|| -> Result<HashMap<String,HashMap<String,Vec<String>>>,String> {
+            let file=File::open(path).map_err(|e|e.to_string())?;
+            let mut zip=zip::ZipArchive::new(file).map_err(|e|e.to_string())?;
+            let mut json=String::new();
+            zip.by_name("porting/native_audio_cue_map.json")
+                .map_err(|e|e.to_string())?
+                .read_to_string(&mut json).map_err(|e|e.to_string())?;
+            serde_json::from_str(&json).map_err(|e|e.to_string())
+        })();
+        result.unwrap_or_else(|e|{
+            log::warn!("Fapcraft original NPC audio map not available: {e}");
+            HashMap::new()
+        })
+    })
+}
+
 /// Queue time-aligned GeckoLib sound events once per *client* tick.
-/// The same social_pose clock advances Bia, her partner's skeleton and the
-/// audio cursor. Repeating clips wrap without double-playing a keyframe.
+/// The same social_pose clock advances each character's animation and audio
+/// cursor. Repeating clips wrap without double-playing a keyframe.
 /// Returns registered sound IDs for Game's own audio engine to play.
 pub(crate) fn take_bia_sound_events()->Vec<String> {
     let Some(actions)=SOCIAL.get() else {return Vec::new()};
-    let ids:Vec<u32>={
+    let active:Vec<(u32,&'static str)>={
         let guard=actions.lock().unwrap_or_else(|e|e.into_inner());
-        guard.iter().filter(|(_,state)|state.kind=="bia")
-            .map(|(&id,_)|id).collect()
+        guard.iter().map(|(&id,state)|(id,state.kind)).collect()
     };
     let mut emitted=Vec::new();
-    for id in ids {
+    for (id,kind) in active {
         let Some((SocialAction::Clip(name),time))=social_pose(id) else {continue};
-        let Some(clip)=rigs().get(2).and_then(Option::as_ref)
+        let Some(index)=CHARACTERS.iter().position(|character|character.id==kind)
+            else {continue};
+        let Some(clip)=rigs().get(index).and_then(Option::as_ref)
             .and_then(|rig|rig.actions.get(name)) else {continue};
         let mut guard=actions.lock().unwrap_or_else(|e|e.into_inner());
         let Some(state)=guard.get_mut(&id) else {continue};
@@ -542,21 +568,30 @@ pub(crate) fn take_bia_sound_events()->Vec<String> {
                 cue.time>previous || cue.time<=time
             };
             if !crossed {continue}
-            let categories=bia_audio_categories(&cue.effect);
-            // The Java doggyMoan cue randomly selects ONE of two voice
-            // categories, not both at once.
-            let groups=if cue.effect=="doggyMoan" {
-                let choice=(id as usize + state.sound_counter as usize)%2;
-                &categories[choice..choice+1]
-            } else {categories};
-            for &(base,variants) in groups {
-                let index=bia_fixed_audio_index(&cue.effect,base)
-                    .unwrap_or((id as usize + state.sound_counter as usize)%variants);
-                state.sound_counter=state.sound_counter.wrapping_add(1);
-                // Names exactly match the original JAR's sounds.json and
-                // the audio copied into Fapcraft 0.5.2.
-                let kind=base.rsplit('.').next().unwrap_or(base);
-                emitted.push(format!("sexmod:{base}.{kind}{index}"));
+            let categories=if kind=="bia" {bia_audio_categories(&cue.effect)}
+                else {&[]};
+            if !categories.is_empty() {
+                // Bia retains her explicit Java voice mappings and sample
+                // indices. Do not replace them with a generic sound.
+                let groups=if cue.effect=="doggyMoan" {
+                    let choice=(id as usize + state.sound_counter as usize)%2;
+                    &categories[choice..choice+1]
+                } else {categories};
+                for &(base,variants) in groups {
+                    let index=bia_fixed_audio_index(&cue.effect,base)
+                        .unwrap_or((id as usize+state.sound_counter as usize)%variants);
+                    state.sound_counter=state.sound_counter.wrapping_add(1);
+                    let sample=base.rsplit('.').next().unwrap_or(base);
+                    emitted.push(format!("sexmod:{base}.{sample}{index}"));
+                }
+            } else if let Some(options)=original_audio_map().get(kind)
+                .and_then(|table|table.get(&cue.effect)) {
+                if !options.is_empty() {
+                    let index=(id as usize + state.sound_counter as usize)
+                        % options.len();
+                    emitted.push(format!("sexmod:{}",options[index]));
+                    state.sound_counter=state.sound_counter.wrapping_add(1);
+                }
             }
         }
     }
