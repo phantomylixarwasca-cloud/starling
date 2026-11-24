@@ -335,7 +335,11 @@ impl Game<'_> {
             if self.res.facts().get(feet).name.ends_with("_bed") {
                 pos.y=pos.y.max(f64::from(y)+9.0/16.0);
             } else if feet.0!=0 {
-                return None
+                // Keep Steve's exact horizontal coordinates even when the
+                // sampled head puts the feet slightly inside the floor.
+                // Move the *fixed* collision onto that block's top, not
+                // back to the old invisible approach position.
+                pos.y=pos.y.max(f64::from(y+1));
             }
             let top=self.world.block(x,pos.y.floor() as i32+1,z);
             if top.0!=0 {return None}
