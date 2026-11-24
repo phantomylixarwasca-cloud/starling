@@ -141,58 +141,85 @@ struct CharacterAction {
 /// These entries reference real animation keys shipped in each character's
 /// original GeckoLib JSON. No generic "everyone gets a headpat" fallback.
 fn character_actions(kind: &str) -> &'static [CharacterAction] {
+    // Every offered action was checked against the exact corresponding
+    // animation namespace in the original Fapcraft 1.12.2 v1.1 JAR.
+    // These are individual gestures/one-shot source clips, not fake shared
+    // social actions and NOT replacements for the per-NPC Forge scene
+    // state machines that will require separate porting.
     match kind {
         "jenny" => &[
-            CharacterAction{label:"Saludar",clip:"wave",response:"¡Hola!"},
-            CharacterAction{label:"Alegrarse",clip:"fhappy",response:"Jiji~"},
-            CharacterAction{label:"Gesto de intercambio",clip:"payment",response:"¿Un trato?"},
-            CharacterAction{label:"Bailar",clip:"fortnite",response:"¡Vamos!"},
+            CharacterAction{label:"Saludar",clip:"wave",response:"Animación original: wave"},
+            CharacterAction{label:"Alegrarse",clip:"fhappy",response:"Animación original: fhappy"},
+            CharacterAction{label:"Intercambiar",clip:"payment",response:"Animación original: payment"},
+            CharacterAction{label:"Bailar",clip:"fortnite",response:"Animación original: fortnite"},
+            CharacterAction{label:"Cambiar de ropa",clip:"strip",response:"Animación original: strip"},
+            CharacterAction{label:"Sentarse",clip:"sit",response:"Animación original: sit"},
         ],
         "ellie" => &[
-            CharacterAction{label:"Abrazar",clip:"hug",response:"Mhm..."},
-            CharacterAction{label:"Sentarse",clip:"sitdown",response:"Un descanso."},
-            CharacterAction{label:"Descansar sentada",clip:"sitdownidle",response:"..."},
+            CharacterAction{label:"Abrazar",clip:"hug",response:"Animación original: hug"},
+            CharacterAction{label:"Sentarse",clip:"sitdown",response:"Animación original: sitdown"},
+            CharacterAction{label:"Descansar",clip:"sitdownidle",response:"Animación original: sitdownidle"},
+            CharacterAction{label:"Gesto de abrazo",clip:"hugselected",response:"Animación original: hugselected"},
+            CharacterAction{label:"Cambiar de ropa",clip:"strip",response:"Animación original: strip"},
+            CharacterAction{label:"Impulsarse",clip:"dash",response:"Animación original: dash"},
         ],
-        // Bia's three actual Forge actions are handled by her dedicated menu.
-        "bia" => &[],
         "slime" => &[
-            CharacterAction{label:"Saltar",clip:"jumpstart",response:"¡Boing!"},
-            CharacterAction{label:"Alegrarse",clip:"fhappy",response:"¡Bien!"},
-            CharacterAction{label:"Sentarse",clip:"sit",response:"..."},
+            CharacterAction{label:"Saltar",clip:"jumpstart",response:"Animación original: jumpstart"},
+            CharacterAction{label:"Aterrizar",clip:"jumpend",response:"Animación original: jumpend"},
+            CharacterAction{label:"Alegrarse",clip:"fhappy",response:"Animación original: fhappy"},
+            CharacterAction{label:"Sentarse",clip:"sit",response:"Animación original: sit"},
+            CharacterAction{label:"Cambiar de ropa",clip:"strip",response:"Animación original: strip"},
         ],
         "bee" => &[
-            CharacterAction{label:"Movimiento defensivo",clip:"attack0",response:"Bzz!"},
+            CharacterAction{label:"Gesto defensivo",clip:"attack0",response:"Animación original: attack0"},
+            CharacterAction{label:"Descansar",clip:"idle",response:"Animación original: idle"},
+            CharacterAction{label:"Con cofre",clip:"idle_has_chest",response:"Animación original: idle_has_chest"},
+            CharacterAction{label:"Lanzar perla",clip:"throw_pearl",response:"Animación original: throw_pearl"},
         ],
         "luna" => &[
-            CharacterAction{label:"Caricias",clip:"head_pat",response:"..."},
-            CharacterAction{label:"Preparar la pesca",clip:"start_fishing",response:"¡A pescar!"},
-            CharacterAction{label:"Sentarse",clip:"sitting_intro",response:"..."},
+            CharacterAction{label:"Acariciar",clip:"head_pat",response:"Animación original: head_pat"},
+            CharacterAction{label:"Preparar pesca",clip:"start_fishing",response:"Animación original: start_fishing"},
+            CharacterAction{label:"Esperar pesca",clip:"idle_fishing",response:"Animación original: idle_fishing"},
+            CharacterAction{label:"Dar pescado",clip:"throw_away",response:"Animación original: throw_away"},
+            CharacterAction{label:"Sentarse",clip:"sitting_intro",response:"Animación original: sitting_intro"},
+            CharacterAction{label:"Comer pescado",clip:"eat_fishing",response:"Animación original: eat_fishing"},
         ],
         "allie" => &[
-            CharacterAction{label:"Invocar",clip:"summon",response:"Aquí estoy."},
-            CharacterAction{label:"Aparecer",clip:"summon_normal",response:"Hola, mortal."},
-            CharacterAction{label:"Mostrar poderes",clip:"rich_normal",response:"¡Observa!"},
+            CharacterAction{label:"Invocar",clip:"summon",response:"Animación original: summon"},
+            CharacterAction{label:"Aparecer",clip:"summon_normal",response:"Animación original: summon_normal"},
+            CharacterAction{label:"Mostrar poderes",clip:"rich_normal",response:"Animación original: rich_normal"},
+            CharacterAction{label:"Parpadear",clip:"blink",response:"Animación original: blink"},
         ],
         "kobold" => &[
-            CharacterAction{label:"Dormir",clip:"sleep",response:"Zzz..."},
-            CharacterAction{label:"Sentarse",clip:"sit",response:"..."},
-            CharacterAction{label:"Parpadear",clip:"blink",response:"..."},
+            CharacterAction{label:"Dormir",clip:"sleep",response:"Animación original: sleep"},
+            CharacterAction{label:"Sentarse",clip:"sit",response:"Animación original: sit"},
+            CharacterAction{label:"Mochila",clip:"paymentBackpack",response:"Animación original: paymentBackpack"},
+            CharacterAction{label:"Caer",clip:"fall_tree",response:"Animación original: fall_tree"},
+            CharacterAction{label:"Correr",clip:"run",response:"Animación original: run"},
         ],
         "goblin" => &[
-            CharacterAction{label:"Saltar",clip:"jump_1",response:"¡Hey!"},
-            CharacterAction{label:"Levantarse",clip:"stand_up",response:"¡Arriba!"},
-            CharacterAction{label:"Sentarse",clip:"sit",response:"..."},
+            CharacterAction{label:"Saltar",clip:"jump_1",response:"Animación original: jump_1"},
+            CharacterAction{label:"Segundo salto",clip:"jump_2",response:"Animación original: jump_2"},
+            CharacterAction{label:"Levantarse",clip:"stand_up",response:"Animación original: stand_up"},
+            CharacterAction{label:"Esperar",clip:"await_pick_up",response:"Animación original: await_pick_up"},
+            CharacterAction{label:"Sentarse",clip:"sit",response:"Animación original: sit"},
         ],
         "galath" => &[
-            CharacterAction{label:"Entregar moneda",clip:"give_coin",response:"Toma."},
-            CharacterAction{label:"Invocar",clip:"summon",response:"..."},
-            CharacterAction{label:"Impulsarse",clip:"boost",response:"..."},
+            CharacterAction{label:"Dar moneda",clip:"give_coin",response:"Animación original: give_coin"},
+            CharacterAction{label:"Invocar",clip:"summon",response:"Animación original: summon"},
+            CharacterAction{label:"Impulsarse",clip:"boost",response:"Animación original: boost"},
+            CharacterAction{label:"Volar",clip:"controlled_flight",response:"Animación original: controlled_flight"},
+            CharacterAction{label:"Conjurar",clip:"summon_skeleton",response:"Animación original: summon_skeleton"},
+            CharacterAction{label:"Levantarse",clip:"knocked_out_stand_up",response:"Animación original: knocked_out_stand_up"},
         ],
         "manglelie" => &[
-            CharacterAction{label:"Enfadarse",clip:"angry_face",response:"¡Eh!"},
-            CharacterAction{label:"Caminar",clip:"walk",response:"..."},
-            CharacterAction{label:"Correr",clip:"running",response:"..."},
+            CharacterAction{label:"Enfadarse",clip:"angry_face",response:"Animación original: angry_face"},
+            CharacterAction{label:"Caminar",clip:"walk",response:"Animación original: walk"},
+            CharacterAction{label:"Correr",clip:"running",response:"Animación original: running"},
+            CharacterAction{label:"Huir",clip:"scared_run",response:"Animación original: scared_run"},
+            CharacterAction{label:"Sentarse con Galath",clip:"sit_on_galath",response:"Animación original: sit_on_galath"},
         ],
+        "bia" => &[], // Dedicated fully staged Bia menu
         _ => &[],
     }
 }
@@ -938,7 +965,10 @@ impl Game<'_> {
                 // chosen. Return to world view so the player can see and
                 // perform the paired gesture instead of staying in a dialog.
                 social=Some(action.clip);
-                voice=true;
+                // The original GeckoLib SoundKeyframeEvent on this very
+                // character now controls audio. Playing an unrelated ambient
+                // sound at click time would duplicate or mismatch the scene.
+                voice=false;
                 close=true;
             },
             (Page::Actions,index) if index==character_actions(menu.kind).len()+1=>{
@@ -1027,6 +1057,17 @@ impl Game<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn ten_character_menus_are_not_generic_fallbacks() {
+        for kind in ["jenny","ellie","slime","bee","luna","allie",
+            "kobold","goblin","galath","manglelie"] {
+            assert!(character_actions(kind).len()>=4, "{kind}");
+            assert!(character_actions(kind).iter().all(|a|!a.clip.is_empty()));
+        }
+        assert!(character_actions("bia").is_empty());
+        assert!(character_actions("other").is_empty());
+        assert_ne!(character_actions("jenny")[0].clip,
+            character_actions("ellie")[0].clip);
+    }
     #[test] fn bia_waits_at_original_navigation_anchor() {
         let at=bia_staged_pose("doggy",[10.5,64.0,9.5],0.0);
         assert_eq!(at,[10.5,64.0,9.5]);
