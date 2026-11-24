@@ -2501,6 +2501,7 @@ impl Mob {
     /// block (`onClimbable`, cached by the last tick).
     pub fn pushable(&self) -> bool {
         self.alive()
+            && !self.no_physics
             && !matches!(self.species(), Species::Bat | Species::Shulker)
             && !self.on_climbable
             && (self.species() != Species::Creaking || super::creaking::can_move(self))
@@ -2531,7 +2532,9 @@ fn push_entities(
     events: &mut Vec<MobEvent>,
 ) {
     m.on_climbable = on_climbable(m, w);
-    if m.species() == Species::Bat {
+    // A scripted no-physics entity keeps its queryable bounds, but must
+    // neither push another entity nor receive overlap impulses.
+    if m.no_physics || m.species() == Species::Bat {
         return;
     }
     let bounds = m.bounds();
@@ -5240,6 +5243,48 @@ mod same_vehicle_push_tests {
             vec![1],
             "the cow pushes a horse nobody rides"
         );
+    }
+}
+
+#[cfg(test)]
+mod no_physics_push_tests {
+    use super::*;
+    use crate::mobs::world::{test_player, with_test_world};
+
+    #[test]
+    fn no_physics_disables_overlap_pushes_until_restored() {
+        let mut test_level = crate::health::TestLevel::new(0);
+        let level = &mut test_level.level();
+        with_test_world(&[], |world, types| {
+            let kind = std::sync::Arc::new(types.types["minecraft:cow"].clone());
+            let mut actor = Mob::new(1, kind.clone(), Vec3::new(0.5, 64.0, 0.5), 0.0);
+            let mut other = Mob::new(2, kind, Vec3::new(0.8, 64.0, 0.5), 0.0);
+            let mut w = world.clone();
+            w.player = Some(test_player(Vec3::new(0.8, 64.0, 0.5)));
+            actor.no_physics = true;
+            assert!(!actor.pushable());
+            assert!(!actor.seen(None, &crate::items::Items::empty()).pushable);
+            let mut events = Vec::new();
+            push_entities(&mut actor, &w, level, &mut events);
+            assert_eq!(actor.velocity, Vec3::ZERO);
+            assert!(!events.iter().any(|e| matches!(e, MobEvent::Push { .. })));
+
+            let snapshot = [actor.seen(None, &crate::items::Items::empty())];
+            w.others = &snapshot;
+            w.player = None;
+            push_entities(&mut other, &w, level, &mut events);
+            assert_eq!(other.velocity, Vec3::ZERO);
+            assert!(!events.iter().any(|e| matches!(e, MobEvent::Push { .. })));
+
+            actor.no_physics = false;
+            assert!(actor.pushable());
+            let snapshot = [actor.seen(None, &crate::items::Items::empty())];
+            w.others = &snapshot;
+            push_entities(&mut other, &w, level, &mut events);
+            assert!(events.iter().any(|e| matches!(e, MobEvent::Push {
+                target: Who::Mob(1), ..
+            })));
+        });
     }
 }
 
