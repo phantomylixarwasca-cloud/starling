@@ -157,9 +157,18 @@ mod camera_type_tests {
             assert!(!game.apply_requested_camera_type());
             game.sync_animation_camera(true);
             assert_eq!(game.camera_type(), FirstPerson);
-            game.cycle_camera_from_touch();
+            // Simulate explicit manual selections without relying on a
+            // live animation in this resource-based test.
+            game.animation_camera_manual = true;
+            game.apply_camera_type(ThirdPersonBack);
             game.sync_animation_camera(true);
             assert_eq!(game.camera_type(), ThirdPersonBack);
+            game.apply_camera_type(ThirdPersonFront);
+            game.sync_animation_camera(true);
+            assert_eq!(game.camera_type(), ThirdPersonFront);
+            game.apply_camera_type(FirstPerson);
+            game.sync_animation_camera(true);
+            assert_eq!(game.camera_type(), FirstPerson);
             game.sync_animation_camera(false);
             game.sync_animation_camera(true);
             assert_eq!(game.camera_type(), FirstPerson);

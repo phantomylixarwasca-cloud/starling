@@ -8872,7 +8872,13 @@ impl Game<'_> {
         };
         self.custom_sky_frame([camera.x, camera.y, camera.z], &sky, (rain, thunder), title);
         pr.lap("pr_celestial");
-        let (mut hand, hand_items) = if title || self.scoping() {
+        let animated_avatar = self.camera_type.is_first_person()
+            && self.animation_camera_active
+            && fapcraft_native::bia_active_actor().is_some_and(|id| {
+                self.mobs.iter().any(|mob| mob.id == id && !mob.removed)
+                    && fapcraft_native::bia_avatar_available(id)
+            });
+        let (mut hand, hand_items) = if title || self.scoping() || animated_avatar {
             Default::default()
         } else {
             self.hand_geometry(camera_alpha)

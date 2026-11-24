@@ -689,6 +689,13 @@ pub(crate) fn bia_partner_body_offset(id:u32,body_yaw:f32)->Option<[f64;3]> {
 /// partner arm channels for the actual POV hand meshes as well, so the
 /// first-person camera does not keep playing vanilla idle arm motion.
 /// Third person still draws the complete Steve hierarchy.
+pub(crate) fn bia_avatar_available(id:u32)->bool {
+    let Some((SocialAction::Clip(name),_))=social_pose(id) else {return false};
+    paired_clip(name) && rigs().get(2).and_then(Option::as_ref)
+        .is_some_and(|rig|rig.actions.contains_key(name)
+            && rig.bones.iter().any(|bone|bone.name=="steve"))
+}
+
 pub(crate) fn bia_pov_hand_rotations()->Option<[[f32;3];2]> {
     if !BIA_FIRST_PERSON.load(Ordering::Relaxed) {return None}
     let id={
@@ -1133,6 +1140,9 @@ fn visit(rig: &Rig, index: usize, clip: Option<&Clip>, time: f32, draw:&mut dyn 
     if player_pass {
         // Java cv.java chooses Steve or Alex arm geometry, never both.
         if bone.name.ends_with("Alex") || bone.name=="items" {return}
+        // In first person the same avatar is visible below the camera,
+        // but its head must not obscure the view from inside the model.
+        if BIA_FIRST_PERSON.load(Ordering::Relaxed) && bone.name=="Head2" {return}
     } else if hidden_in_default_character_pose(&bone.name)
         || (bone.name=="pillow" && !show_pillow) {
         return;
@@ -1226,11 +1236,11 @@ impl EntityRenderer for Renderer {
         // textured traversal of its geobone 'steve'. The joint animation
         // channels are the SAME Clip and time as Bia; previous Rust releases
         // silently discarded this subtree and only posed loose player arms.
-        // Hide this embedded mesh in POV so the normal first-person controls
-        // and animated arms remain unobstructed. F5 may freely change view.
+        // The same avatar rig and texture are used in every perspective.
+        // The POV traversal hides only its head; the normal hand overlay
+        // is omitted by the client when this avatar is present.
         if self.0==2 && social_state.is_some_and(|(action,_)|
-            matches!(action,SocialAction::Clip(name) if paired_clip(name)))
-            && !BIA_FIRST_PERSON.load(Ordering::Relaxed) {
+            matches!(action,SocialAction::Clip(name) if paired_clip(name))) {
             if let Some(steve)=rig.bones.iter().position(|bone|bone.name=="steve") {
                 visit(rig,steve,clip,time,draw,0,false,true,
                     "sexmod:player/steve");

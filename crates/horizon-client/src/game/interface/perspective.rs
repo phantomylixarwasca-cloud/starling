@@ -283,6 +283,10 @@ fn wrap(d: f32) -> f32 {
 impl Game<'_> {
     /// `key.togglePerspective`: the next camera type, as a mod's `camera_type_cycle` leaves it.
     pub(super) fn cycle_camera(&mut self) {
+        // Synchronize before manual input, so the next rendered frame
+        // cannot mistake the tap for an uninitialized animation camera.
+        let active = self.player.is_some() && super::fapcraft_native::bia_session_active();
+        self.sync_animation_camera(active);
         // Perspective selection is independent of the movement lock.
         self.apply_requested_camera_type();
         if self.animation_camera_active {
@@ -300,6 +304,8 @@ impl Game<'_> {
     /// to substitute a different view or a pending request to skip a step.
     #[cfg(any(target_os = "android", test))]
     pub(in crate::game) fn cycle_camera_from_touch(&mut self) {
+        let active = self.player.is_some() && super::fapcraft_native::bia_session_active();
+        self.sync_animation_camera(active);
         let previous = self.camera_type;
         let next = previous.cycle();
         self.touch_camera_locked = true;

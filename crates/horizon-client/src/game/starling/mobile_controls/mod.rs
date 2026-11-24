@@ -461,6 +461,23 @@ impl Game<'_> {
             self.mobile_click_feedback();
             return;
         }
+        // Deliver the dedicated camera button on pointer-down, before
+        // world movement, auxiliary mouse routing or frame polling can
+        // consume the gesture. One pointer owns exactly one camera step.
+        if t.phase == TouchPhase::Started
+            && self.screen == Screen::Playing
+            && !self.replay.playing()
+            && !self.mobile.ui.floating_menu
+            && self.mobile.controls.custom_at(n).is_none()
+            && self.mobile.controls.control_at(n)
+                == Some(horizon_client::android_controls::Control::Perspective)
+        {
+            self.mobile.controls.ignore(t.id);
+            self.mobile.controls.perspective_requested = false;
+            self.cycle_camera_from_touch();
+            self.mobile_click_feedback();
+            return;
+        }
         if t.phase == TouchPhase::Started
             && let Some(out) = self.mobile.ui.keyboard_touch(&mut b, &self.gui.atlas, p)
         {
