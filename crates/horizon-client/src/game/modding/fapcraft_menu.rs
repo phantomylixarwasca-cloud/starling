@@ -936,6 +936,17 @@ impl Game<'_> {
             (Page::Actions,0)=>{menu.page=Page::Dialogue;},
             (Page::Actions,index) if index >= 1 && index <= character_actions(menu.kind).len() => {
                 let action=character_actions(menu.kind)[index-1];
+                if action.clip=="strip" {
+                    let requested=u32::try_from(menu.entity).ok()
+                        .and_then(|id|super::fapcraft_native::
+                            toggle_character_dress(id,menu.kind));
+                    if requested.is_none() {
+                        self.send_overlay_message(Text::literal(
+                            "Este personaje está terminando el cambio de ropa"
+                        ));
+                        return;
+                    }
+                }
                 // Contact requires reach, not a remote animation while the
                 // player is still several blocks from the character.
                 if matches!(action.clip,"headpat"|"head_pat"|"hug") {
