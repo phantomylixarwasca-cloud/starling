@@ -2126,6 +2126,10 @@ struct Game<'a> {
     links_ui: server_links::LinksUi,
     camera_type: horizon_client::camera::CameraType,
     requested_camera_type: std::cell::Cell<Option<horizon_client::camera::CameraType>>,
+    // Once the player uses the touch perspective control, its selection is
+    // authoritative until the game is recreated. Native camera hooks must
+    // not silently replace the chosen view on the next frame.
+    touch_camera_locked: bool,
     fangs: fangs::FangState,
     /// The local player as a model (third person, the inventory).
     player_model: Option<Mob>,
@@ -8383,6 +8387,7 @@ impl Game<'_> {
         let vanilla = self.camera_view(camera_alpha as f32);
         let view = vanilla.map(|view| {
             if self.shows_panorama() || self.studio.flying()
+                || self.touch_camera_locked
                 || fapcraft_native::bia_session_active() {
                 // During Bia's paired scene, Camera.update already uses
                 // the animated Steve head as the camera entity. External
@@ -11477,6 +11482,7 @@ impl<'a> Game<'a> {
             links_ui: Default::default(),
             camera_type: Default::default(),
             requested_camera_type: Default::default(),
+            touch_camera_locked: false,
             fangs: Default::default(),
             player_model: None,
         };

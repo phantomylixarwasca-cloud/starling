@@ -10,6 +10,8 @@ fn a_living_mod_types_row_is_its_templates_with_its_attributes() {
         template: "minecraft:zombie".into(),
         shadow_radius: Some(0.2),
         shadow_strength: Some(0.6),
+        width: None,
+        height: None,
         item: None,
         damage: 0.0,
         sounds: Default::default(),

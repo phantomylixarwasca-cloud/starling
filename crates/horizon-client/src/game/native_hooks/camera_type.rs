@@ -17,7 +17,9 @@ impl Game<'_> {
     }
     /// Queue the window's camera type without cycling, including from shared hooks.
     pub(in crate::game) fn set_camera_type(&self, camera_type: CameraType) {
-        self.requested_camera_type.set(Some(camera_type));
+        if !self.touch_camera_locked {
+            self.requested_camera_type.set(Some(camera_type));
+        }
     }
 }
 
@@ -110,10 +112,36 @@ mod camera_type_tests {
                     game.set_camera_type(ThirdPersonFront);
                     game.cycle_camera_from_touch();
                     assert_eq!(game.camera_type(), expected);
+                    // A later hook cannot undo the manual choice on the next frame.
+                    game.set_camera_type(ThirdPersonBack);
+                    assert!(!game.apply_requested_camera_type());
+                    assert_eq!(game.camera_type(), expected);
                 }
             });
         });
         assert!(heard.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn touch_first_person_has_no_detached_camera_distance() {
+        use horizon_client::motion::PlayerMotion;
+        use horizon_core::geometry::Vec3;
+        crate::game::native_entity_refs::tests::with_client_game(|game| {
+            game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
+            game.title = None;
+            for expected in [CameraType::ThirdPersonBack, CameraType::ThirdPersonFront, CameraType::FirstPerson] {
+                game.cycle_camera_from_touch();
+                game.set_camera_type(CameraType::ThirdPersonBack);
+                assert!(!game.apply_requested_camera_type());
+                let (position, _, _) = game.camera_view(1.0).unwrap();
+                assert_eq!(game.camera_type(), expected);
+                assert_eq!(game.view.detached, !expected.is_first_person());
+                if expected.is_first_person() {
+                    assert_eq!(position.to_array(), game.view.eye);
+                }
+            }
+        });
     }
 
     #[derive(Default)]

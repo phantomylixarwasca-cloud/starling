@@ -287,7 +287,9 @@ impl Game<'_> {
         self.apply_requested_camera_type();
         let previous = self.camera_type;
         let mut next = previous.cycle();
-        self.native_camera_type_cycle(previous, &mut next);
+        if !self.touch_camera_locked {
+            self.native_camera_type_cycle(previous, &mut next);
+        }
         self.apply_camera_type(next);
     }
     /// The dedicated touch UI cycles all three built-in views once per tap.
@@ -297,6 +299,7 @@ impl Game<'_> {
     pub(in crate::game) fn cycle_camera_from_touch(&mut self) {
         let previous = self.camera_type;
         let next = previous.cycle();
+        self.touch_camera_locked = true;
         self.apply_camera_type(next);
         log::info!("Starling: touch perspective {previous:?} -> {next:?}");
     }
@@ -318,6 +321,9 @@ impl Game<'_> {
         let Some(camera_type) = self.requested_camera_type.take() else {
             return false;
         };
+        if self.touch_camera_locked {
+            return false;
+        }
         let changed = self.camera_type != camera_type;
         self.apply_camera_type(camera_type);
         changed
