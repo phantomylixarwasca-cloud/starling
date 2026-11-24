@@ -310,7 +310,6 @@ impl Game<'_> {
             return
         };
         let Some(current)=self.player.as_ref() else {return};
-        let current_pos=current.position;
         let eye_height=f64::from(current.dimensions.eye_height);
         let candidate=self.mobs.iter().find(|mob|mob.id==id && !mob.removed)
             .and_then(|mob|{
@@ -321,9 +320,9 @@ impl Game<'_> {
                     mob.position.z+local[2]))
             });
 
-        // Reject invalid placements and use the safe starting tile if
-        // Steve's rig is inside a world block. A low bed is non-full but
-        // occupies its whole block ID: place feet on the bed's 9/16 top.
+        // A missing pose or temporarily unavailable chunk must not latch the
+        // previous player location as the scene anchor. Retry next tick.
+        // Keep collision-safe placement in the same horizontal column.
         let target=candidate.and_then(|mut pos|{
             if !pos.x.is_finite() || !pos.y.is_finite()
                 || !pos.z.is_finite() {return None}
@@ -344,13 +343,14 @@ impl Game<'_> {
             let top=self.world.block(x,pos.y.floor() as i32+1,z);
             if top.0!=0 {return None}
             Some(pos)
-        }).unwrap_or(current_pos);
+        });
         let (at,first)={
             let mut held=bia_player_anchor().lock()
                 .unwrap_or_else(|e|e.into_inner());
             match *held {
                 Some((which,location)) if which==id => (location,false),
                 _=>{
+                    let Some(target)=target else {return};
                     let location=[target.x,target.y,target.z];
                     *held=Some((id,location));
                     (location,true)

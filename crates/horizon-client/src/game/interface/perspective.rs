@@ -296,6 +296,9 @@ impl Game<'_> {
         self.requested_camera_type.take();
         let previous = self.camera_type;
         self.camera_type = camera_type;
+        // A frame may be rendered before the next simulation tick. Publish
+        // the current view immediately so geometry and camera agree.
+        super::fapcraft_native::set_bia_first_person(camera_type.is_first_person());
         if previous.is_first_person() != camera_type.is_first_person() {
             self.check_entity_post_effect(camera_type.is_first_person());
         }
