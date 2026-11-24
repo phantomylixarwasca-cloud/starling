@@ -373,6 +373,28 @@ impl BodyPose for FapcraftPlayerPose {
         true
     }
 }
+/// Bia's source keyframe transitions, independently testable without a
+/// live world or Android. The hard clips declare 2.04167 s but repeat at
+/// their `doggyReset` keyframe (0.625 s), not at the declared end.
+fn bia_loop_followup(action:SocialAction,fast:bool,elapsed:f32)
+    ->Option<&'static str> {
+    match action {
+        SocialAction::Clip("anal_slow") if fast => Some("anal_fast"),
+        SocialAction::Clip("anal_fast") if !fast => Some("anal_slow"),
+        SocialAction::Clip("prone_doggy_soft") if fast && elapsed>=0.375 =>
+            Some("prone_doggy_hard1"),
+        SocialAction::Clip("prone_doggy_hard1"|"prone_doggy_hard2"|"prone_doggy_hard3")
+            if !fast => Some("prone_doggy_soft"),
+        SocialAction::Clip("prone_doggy_hard1") if elapsed>=0.625 =>
+            Some("prone_doggy_hard2"),
+        SocialAction::Clip("prone_doggy_hard2") if elapsed>=0.625 =>
+            Some("prone_doggy_hard3"),
+        SocialAction::Clip("prone_doggy_hard3") if elapsed>=0.625 =>
+            Some("prone_doggy_hard1"),
+        _=>None,
+    }
+}
+
 fn social_pose(id: u32) -> Option<(SocialAction, f32)> {
     let mut actions = SOCIAL.get()?.lock().unwrap_or_else(|p| p.into_inner());
     let state = actions.get_mut(&id)?;
@@ -410,21 +432,7 @@ fn social_pose(id: u32) -> Option<(SocialAction, f32)> {
     //   doggyReset  @ 0.625 in hard -> another hard variation.
     // Every hard*.animation_length is 2.04167 s, but allowing it to
     // finish made the Rust fast mode slower than Java and Ana.
-    let next_loop=match state.action {
-        SocialAction::Clip("anal_slow") if fast => Some("anal_fast"),
-        SocialAction::Clip("anal_fast") if !fast => Some("anal_slow"),
-        SocialAction::Clip("prone_doggy_soft") if fast && current>=0.375 =>
-            Some("prone_doggy_hard1"),
-        SocialAction::Clip("prone_doggy_hard1"|"prone_doggy_hard2"|"prone_doggy_hard3")
-            if !fast => Some("prone_doggy_soft"),
-        SocialAction::Clip("prone_doggy_hard1") if current>=0.625 =>
-            Some("prone_doggy_hard2"),
-        SocialAction::Clip("prone_doggy_hard2") if current>=0.625 =>
-            Some("prone_doggy_hard3"),
-        SocialAction::Clip("prone_doggy_hard3") if current>=0.625 =>
-            Some("prone_doggy_hard1"),
-        _=>None,
-    };
+    let next_loop=bia_loop_followup(state.action,fast,current);
     if let Some(next)=next_loop {
         state.action=SocialAction::Clip(next);
         state.duration=duration(next);
@@ -1210,6 +1218,23 @@ mod tests {
         assert!(!BIA_FIRST_PERSON.load(Ordering::Relaxed));
         set_bia_jump(false);
         assert!(!BIA_JUMP_HELD.load(Ordering::Relaxed));
+    }
+    #[test]
+    fn doggy_shift_switches_at_geckolib_cues_not_animation_end() {
+        assert_eq!(bia_loop_followup(SocialAction::Clip("prone_doggy_soft"),
+            true,0.374),None);
+        assert_eq!(bia_loop_followup(SocialAction::Clip("prone_doggy_soft"),
+            true,0.375),Some("prone_doggy_hard1"));
+        assert_eq!(bia_loop_followup(SocialAction::Clip("prone_doggy_hard1"),
+            true,0.624),None);
+        assert_eq!(bia_loop_followup(SocialAction::Clip("prone_doggy_hard1"),
+            true,0.625),Some("prone_doggy_hard2"));
+        assert_eq!(bia_loop_followup(SocialAction::Clip("prone_doggy_hard2"),
+            true,0.625),Some("prone_doggy_hard3"));
+        assert_eq!(bia_loop_followup(SocialAction::Clip("prone_doggy_hard3"),
+            false,0.010),Some("prone_doggy_soft"));
+        assert_eq!(bia_loop_followup(SocialAction::Clip("anal_slow"),
+            true,0.001),Some("anal_fast"));
     }
     #[test]
     fn bia_keyframe_timings_match_original_assets() {
