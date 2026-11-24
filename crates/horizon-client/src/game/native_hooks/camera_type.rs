@@ -17,7 +17,7 @@ impl Game<'_> {
     }
     /// Queue the window's camera type without cycling, including from shared hooks.
     pub(in crate::game) fn set_camera_type(&self, camera_type: CameraType) {
-        if !self.touch_camera_locked {
+        if !self.touch_camera_locked && !self.animation_camera_active {
             self.requested_camera_type.set(Some(camera_type));
         }
     }
@@ -141,6 +141,28 @@ mod camera_type_tests {
                     assert_eq!(position.to_array(), game.view.eye);
                 }
             }
+        });
+    }
+
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn animation_entry_resets_camera_and_only_manual_input_can_change_it() {
+        use CameraType::*;
+        crate::game::native_entity_refs::tests::with_client_game(|game| {
+            game.cycle_camera_from_touch();
+            assert_eq!(game.camera_type(), ThirdPersonBack);
+            game.sync_animation_camera(true);
+            assert_eq!(game.camera_type(), FirstPerson);
+            game.set_camera_type(ThirdPersonFront);
+            assert!(!game.apply_requested_camera_type());
+            game.sync_animation_camera(true);
+            assert_eq!(game.camera_type(), FirstPerson);
+            game.cycle_camera_from_touch();
+            game.sync_animation_camera(true);
+            assert_eq!(game.camera_type(), ThirdPersonBack);
+            game.sync_animation_camera(false);
+            game.sync_animation_camera(true);
+            assert_eq!(game.camera_type(), FirstPerson);
         });
     }
 

@@ -2130,6 +2130,9 @@ struct Game<'a> {
     // authoritative until the game is recreated. Native camera hooks must
     // not silently replace the chosen view on the next frame.
     touch_camera_locked: bool,
+    // Client-local animation camera state, independent of the server's ticks.
+    animation_camera_active: bool,
+    animation_camera_manual: bool,
     fangs: fangs::FangState,
     /// The local player as a model (third person, the inventory).
     player_model: Option<Mob>,
@@ -8378,17 +8381,16 @@ impl Game<'_> {
         // player's own model stay smooth while the level is frozen.
         let camera_alpha = self.clock.camera_fraction();
         self.apply_requested_camera_type();
-        // Consume the initial perspective request only in the actual rendered
-        // local-player frame, never from a non-rendering game instance.
-        if self.player.is_some() && fapcraft_native::take_bia_initial_pov() {
-            self.apply_camera_type(horizon_client::camera::CameraType::FirstPerson);
-        }
+        // The visible client, not a shared one-shot flag or a server Game,
+        // owns the transition into the default camera view.
+        let animated = self.player.is_some() && fapcraft_native::bia_session_active();
+        self.sync_animation_camera(animated);
         fapcraft_native::set_bia_first_person(self.camera_type.is_first_person());
         let vanilla = self.camera_view(camera_alpha as f32);
         let view = vanilla.map(|view| {
             if self.shows_panorama() || self.studio.flying()
                 || self.touch_camera_locked
-                || fapcraft_native::bia_session_active() {
+                || self.animation_camera_active {
                 // During Bia's paired scene, Camera.update already uses
                 // the animated Steve head as the camera entity. External
                 // camera-pose hooks must not move that view back to the
@@ -11483,6 +11485,8 @@ impl<'a> Game<'a> {
             camera_type: Default::default(),
             requested_camera_type: Default::default(),
             touch_camera_locked: false,
+            animation_camera_active: false,
+            animation_camera_manual: false,
             fangs: Default::default(),
             player_model: None,
         };

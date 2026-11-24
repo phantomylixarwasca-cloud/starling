@@ -285,9 +285,12 @@ impl Game<'_> {
     pub(super) fn cycle_camera(&mut self) {
         // Perspective selection is independent of the movement lock.
         self.apply_requested_camera_type();
+        if self.animation_camera_active {
+            self.animation_camera_manual = true;
+        }
         let previous = self.camera_type;
         let mut next = previous.cycle();
-        if !self.touch_camera_locked {
+        if !self.touch_camera_locked && !self.animation_camera_active {
             self.native_camera_type_cycle(previous, &mut next);
         }
         self.apply_camera_type(next);
@@ -300,8 +303,27 @@ impl Game<'_> {
         let previous = self.camera_type;
         let next = previous.cycle();
         self.touch_camera_locked = true;
+        if self.animation_camera_active {
+            self.animation_camera_manual = true;
+        }
         self.apply_camera_type(next);
         log::info!("Starling: touch perspective {previous:?} -> {next:?}");
+    }
+    /// Entering a new animation resets the camera to first person on the
+    /// visible client. Only an explicit perspective input after entry can
+    /// select a different view. This state is owned by each Game instance.
+    pub(super) fn sync_animation_camera(&mut self, active: bool) {
+        if active != self.animation_camera_active {
+            self.animation_camera_active = active;
+            self.animation_camera_manual = false;
+            log::info!("Starling: animation camera active={active}");
+        }
+        if active && !self.animation_camera_manual {
+            self.requested_camera_type.take();
+            if !self.camera_type.is_first_person() {
+                self.apply_camera_type(CameraType::FirstPerson);
+            }
+        }
     }
     /// `Options.setCameraType`, then `Minecraft.handleKeybinds`' check: the chain
     /// follows the first-person view.
@@ -309,9 +331,11 @@ impl Game<'_> {
         self.requested_camera_type.take();
         let previous = self.camera_type;
         self.camera_type = camera_type;
-        // A frame may be rendered before the next simulation tick. Publish
-        // the current view immediately so geometry and camera agree.
-        super::fapcraft_native::set_bia_first_person(camera_type.is_first_person());
+        // Publish model visibility from the actual render frame only. A
+        // server-side Game must never change the client's visibility flag.
+        if previous != camera_type {
+            log::info!("Starling: camera {previous:?} -> {camera_type:?}");
+        }
         if previous.is_first_person() != camera_type.is_first_person() {
             self.check_entity_post_effect(camera_type.is_first_person());
         }
@@ -321,7 +345,7 @@ impl Game<'_> {
         let Some(camera_type) = self.requested_camera_type.take() else {
             return false;
         };
-        if self.touch_camera_locked {
+        if self.touch_camera_locked || self.animation_camera_active {
             return false;
         }
         let changed = self.camera_type != camera_type;
