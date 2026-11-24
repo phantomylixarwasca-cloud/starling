@@ -25,14 +25,10 @@ impl Game<'_> {
                     self.tick_script_step(event_loop);
                 }
                 horizon_client::spans::time("tick", || self.tick())?;
-                // Client and server camera requests are not synchronized.
-                // During the paired scene the correct camera IS the animated
-                // Steve's POV, not the local avatar at the approach tile.
-                // Reassert it each tick; render also reasserts it because a
-                // native camera hook or a mobile toggle may run after tick.
-                let _scene_started=super::fapcraft_native::take_bia_initial_pov();
-                let paired=super::fapcraft_native::bia_session_active();
-                if paired && !self.camera_type.is_first_person() {
+                // Enter first person once, then respect user-selected
+                // perspectives independently of the movement lock.
+                let scene_started=super::fapcraft_native::take_bia_initial_pov();
+                if scene_started && !self.camera_type.is_first_person() {
                     self.apply_camera_type(
                         horizon_client::camera::CameraType::FirstPerson
                     );
@@ -49,7 +45,7 @@ impl Game<'_> {
                 // Do not draw a second Steve avatar across his own POV:
                 // GeckoLib's partner skeleton supplies the animated hands.
                 super::fapcraft_native::set_bia_first_person(
-                    paired || self.camera_type.is_first_person()
+                    self.camera_type.is_first_person()
                 );
                 horizon_client::first_person::set_fapcraft_pov_hands(
                     super::fapcraft_native::bia_pov_hand_rotations()

@@ -283,13 +283,7 @@ fn wrap(d: f32) -> f32 {
 impl Game<'_> {
     /// `key.togglePerspective`: the next camera type, as a mod's `camera_type_cycle` leaves it.
     pub(super) fn cycle_camera(&mut self) {
-        // This scripted paired scene must keep Steve's POV. Allowing a
-        // mobile perspective toggle to switch away from it left an invisible,
-        // freely moving player beside the animated actor.
-        if super::fapcraft_native::bia_session_active() {
-            self.apply_camera_type(CameraType::FirstPerson);
-            return;
-        }
+        // Perspective selection is independent of the movement lock.
         self.apply_requested_camera_type();
         let previous = self.camera_type;
         let mut next = previous.cycle();
@@ -320,13 +314,9 @@ impl Game<'_> {
     /// front of) it, pulled in where visual shapes are in the way. Returns the
     /// position, yaw and pitch to render from.
     pub(super) fn camera_view(&mut self, partial: f32) -> Option<(glam::DVec3, f32, f32)> {
-        // Render can run after both a server handoff and a camera hook.
-        // Establish first-person here, right before Camera.update, instead
-        // of trusting the earlier one-shot client tick to survive the frame.
+        // Respect the selected camera type; the initial POV is a one-shot
+        // client request, not a per-frame override.
         let paired=super::fapcraft_native::bia_session_active();
-        if paired && !self.camera_type.is_first_person() {
-            self.apply_camera_type(CameraType::FirstPerson);
-        }
         if self.studio.flying() {
             return Some((
                 self.studio.freecam.position,
@@ -345,8 +335,7 @@ impl Game<'_> {
             ),
             None => {
                 let mut entity = self.player_camera_entity()?;
-                if self.camera_type.is_first_person()
-                    && let Some(id)=super::fapcraft_native::bia_active_actor()
+                if let Some(id)=super::fapcraft_native::bia_active_actor()
                     && let Some(mob)=self.mobs.iter().find(|m|m.id==id && !m.removed)
                     && let Some(local)=super::fapcraft_native::bia_partner_eye_offset(
                         id,mob.body_yaw)
