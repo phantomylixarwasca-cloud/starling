@@ -938,16 +938,19 @@ fn load_rig_variant(zip: &mut zip::ZipArchive<File>, character: &Character, geom
             actions.insert(suffix.to_owned(), found);
         }
     }
-    // Do not silently omit original character clips merely because they were
-    // not in the old demo buttons. Bia includes 41 source animations.
-    if character.id == "bia" {
-        if let Some(entries) = anim.get("animations").and_then(Value::as_object) {
-            for key in entries.keys() {
-                if let Some(suffix) = key.strip_prefix("animation.bia.") {
-                    if !actions.contains_key(suffix) {
-                        if let Some(found) = clip(&anim, character.alias, suffix) {
-                            actions.insert(suffix.to_owned(), found);
-                        }
+    // The original Java mod has separate state machines for all eleven
+    // characters. Load every real GeckoLib clip for each one (including the
+    // shared namespace used by Galath/Manglelie), not only Bia's 41 clips.
+    // Menu/scene controllers may only reference verified source clip names.
+    if let Some(entries) = anim.get("animations").and_then(Value::as_object) {
+        for key in entries.keys() {
+            let suffix=key.strip_prefix(&format!("animation.{}.",character.alias))
+                .or_else(||key.strip_prefix("animation.shared."));
+            if let Some(suffix)=suffix {
+                if !actions.contains_key(suffix) {
+                    if let Some(found)=clip(&anim,character.alias,suffix)
+                        .or_else(||clip(&anim,"shared",suffix)) {
+                        actions.insert(suffix.to_owned(),found);
                     }
                 }
             }
