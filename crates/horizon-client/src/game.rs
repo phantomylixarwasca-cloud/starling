@@ -8374,6 +8374,12 @@ impl Game<'_> {
         // player's own model stay smooth while the level is frozen.
         let camera_alpha = self.clock.camera_fraction();
         self.apply_requested_camera_type();
+        // Consume the initial perspective request only in the actual rendered
+        // local-player frame, never from a non-rendering game instance.
+        if self.player.is_some() && fapcraft_native::take_bia_initial_pov() {
+            self.apply_camera_type(horizon_client::camera::CameraType::FirstPerson);
+        }
+        fapcraft_native::set_bia_first_person(self.camera_type.is_first_person());
         let vanilla = self.camera_view(camera_alpha as f32);
         let view = vanilla.map(|view| {
             if self.shows_panorama() || self.studio.flying()

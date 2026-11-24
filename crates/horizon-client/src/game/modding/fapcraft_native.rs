@@ -629,11 +629,13 @@ fn bia_bone_matrix(
     let deg=std::array::from_fn::<f32,3,_>(|i|(bone.rotation[i]+rot[i]).to_radians());
     let pivot=Vec3::new(-bone.pivot[0]/16.0,bone.pivot[1]/16.0,
         bone.pivot[2]/16.0);
+    let scale=channel.map_or([1.0;3],|c|sample(&c.scale,time,[1.0;3]));
     parent*Mat4::from_translation(Vec3::new(-p[0]/16.0,p[1]/16.0,p[2]/16.0))
         *Mat4::from_translation(pivot)
         *Mat4::from_rotation_z(deg[2])
         *Mat4::from_rotation_y(-deg[1])
         *Mat4::from_rotation_x(-deg[0])
+        *Mat4::from_scale(Vec3::from_array(scale))
         *Mat4::from_translation(-pivot)
 }
 
@@ -661,6 +663,26 @@ pub(crate) fn bia_partner_eye_offset(id:u32,body_yaw:f32)->Option<[f64;3]> {
         head.pivot[2]/16.0));
     eye.is_finite().then_some([f64::from(eye.x),f64::from(eye.y),
         f64::from(eye.z)])
+}
+
+/// World-oriented center of the model torso, independently of the camera eye.
+pub(crate) fn bia_partner_body_offset(id:u32,body_yaw:f32)->Option<[f64;3]> {
+    use glam::{Mat4,Vec3};
+    let (SocialAction::Clip(key),time)=social_pose(id)? else {return None};
+    if !paired_clip(key) {return None}
+    let rig=rigs().get(2)?.as_ref()?;
+    let clip=rig.actions.get(key)?;
+    let root=rig.bones.iter().find(|bone|bone.name=="steve")?;
+    let torso=rig.bones.iter().find(|bone|bone.name=="Torso2")?;
+    let matrix=bia_bone_matrix(
+        bia_bone_matrix(Mat4::from_rotation_y(geckolib_model_yaw(body_yaw).to_radians()),root,clip,time),
+        torso,clip,time);
+    let center=torso.cubes.first().map_or_else(
+        || Vec3::new(-torso.pivot[0]/16.0,torso.pivot[1]/16.0,torso.pivot[2]/16.0),
+        |c| Vec3::new(-(c.origin[0]+c.size[0]*0.5)/16.0,
+            (c.origin[1]+c.size[1]*0.5)/16.0,(c.origin[2]+c.size[2]*0.5)/16.0));
+    let center=matrix.transform_point3(center);
+    center.is_finite().then_some([f64::from(center.x),f64::from(center.y),f64::from(center.z)])
 }
 
 /// The original source animates two sets of arms. Use the GeckoLib

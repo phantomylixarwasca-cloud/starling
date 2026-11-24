@@ -329,6 +329,7 @@ impl Game<'_> {
         }
         // Minecraft.cameraEntity: a server's spectator camera on a mob or
         // another player.
+        let mut exact_eye = false;
         let (entity, descending, entity_kind) = match
             if paired {None} else {self.spectated_camera_snapshot()} {
             Some(e) => (
@@ -354,6 +355,7 @@ impl Game<'_> {
                         mob.position.z+local[2],
                     ];
                     entity.previous=entity.position;
+                    exact_eye = true;
                 }
                 if let Some(position) = self.remote_minecart_rider_position(partial) {
                     // Already evaluated at partial: do not linearly interpolate
@@ -369,6 +371,13 @@ impl Game<'_> {
             }
         };
         let mut view = self.view;
+        if exact_eye {
+            // The synthetic camera position already subtracts this height.
+            // Camera::align uses interpolated view height, not entity height.
+            // Make the two agree, including on the first frame after crouching.
+            view.eye_height = entity.eye_height;
+            view.eye_height_old = entity.eye_height;
+        }
         let pull = self.hooks_camera_distance(partial);
         let kind = self.camera_type;
 

@@ -310,13 +310,13 @@ impl Game<'_> {
             return
         };
         let Some(current)=self.player.as_ref() else {return};
-        let eye_height=f64::from(current.dimensions.eye_height);
+        let half_height=f64::from(current.dimensions.height)*0.5;
         let candidate=self.mobs.iter().find(|mob|mob.id==id && !mob.removed)
             .and_then(|mob|{
-                let local=super::fapcraft_native::bia_partner_eye_offset(
+                let local=super::fapcraft_native::bia_partner_body_offset(
                     id,mob.body_yaw)?;
                 Some(Vec3::new(mob.position.x+local[0],
-                    mob.position.y+local[1]-eye_height,
+                    mob.position.y+local[1]-half_height,
                     mob.position.z+local[2]))
             });
 
@@ -348,7 +348,13 @@ impl Game<'_> {
             let mut held=bia_player_anchor().lock()
                 .unwrap_or_else(|e|e.into_inner());
             match *held {
-                Some((which,location)) if which==id => (location,false),
+                Some((which,location)) if which==id => {
+                    // A valid body transform can change while a clip plays.
+                    // Preserve the last valid placement during missing samples.
+                    let location=target.map_or(location,|p|[p.x,p.y,p.z]);
+                    *held=Some((id,location));
+                    (location,false)
+                },
                 _=>{
                     let Some(target)=target else {return};
                     let location=[target.x,target.y,target.z];

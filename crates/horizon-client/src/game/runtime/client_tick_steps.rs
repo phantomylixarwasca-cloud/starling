@@ -25,14 +25,7 @@ impl Game<'_> {
                     self.tick_script_step(event_loop);
                 }
                 horizon_client::spans::time("tick", || self.tick())?;
-                // Enter first person once, then respect user-selected
-                // perspectives independently of the movement lock.
-                let scene_started=super::fapcraft_native::take_bia_initial_pov();
-                if scene_started && !self.camera_type.is_first_person() {
-                    self.apply_camera_type(
-                        horizon_client::camera::CameraType::FirstPerson
-                    );
-                }
+                // Initial perspective is applied by the rendered client frame.
                 // Read touch crouch / keyboard Shift from LocalPlayer on the
                 // CLIENT every tick. The server-side player field is often
                 // None and previously reset this to false.
@@ -42,11 +35,7 @@ impl Game<'_> {
                 // Keep the physical collider at one stable Steve scene
                 // anchor, not at the moving head bone (no teleport jitter).
                 self.fapcraft_bia_attach_player_to_steve();
-                // Do not draw a second Steve avatar across his own POV:
-                // GeckoLib's partner skeleton supplies the animated hands.
-                super::fapcraft_native::set_bia_first_person(
-                    self.camera_type.is_first_person()
-                );
+                // The rendered client publishes the current perspective.
                 horizon_client::first_person::set_fapcraft_pov_hands(
                     super::fapcraft_native::bia_pov_hand_rotations()
                 );
