@@ -127,6 +127,13 @@ pub(crate) fn toggle_bia_dress(id: u32) -> Option<bool> {
     pending.insert(id, (Instant::now(), value));
     Some(value)
 }
+/// All four source characters with a separate wardrobe rig share this
+/// per-entity transition timer. Their original strip keyframe switches
+/// geometry at 3.0s; no costume toggle is offered to other NPCs.
+pub(crate) fn toggle_character_dress(id:u32,kind:&str)->Option<bool> {
+    if !matches!(kind,"jenny"|"ellie"|"slime"|"bia") {return None}
+    toggle_bia_dress(id)
+}
 fn bia_undressed(id: u32) -> bool {
     if let Some(pending) = BIA_WARDROBE_PENDING.get() {
         let mut pending = pending.lock().unwrap_or_else(|e|e.into_inner());
@@ -1010,16 +1017,23 @@ fn load_rig_variant(zip: &mut zip::ZipArchive<File>, character: &Character, geom
 
 fn load_rig(zip: &mut zip::ZipArchive<File>, character: &Character) -> Result<Rig, String> {
     let mut rig = load_rig_variant(zip, character, character.geo)?;
-    if character.id == "bia" {
-        let nude=load_rig_variant(zip,character,"geo/bia/bianude.geo.json")?;
-        // In the original source the pillow belongs to the alternate Bia
-        // geometry. Bring that single original bone into the dressed rig so
-        // anal_prepare/anal_wait can show it without changing her outfit.
-        if let Some(pillow)=nude.bones.iter().find(|b|b.name=="pillow") {
-            let mut pillow=pillow.clone();
-            pillow.children.clear();
-            rig.roots.push(rig.bones.len());
-            rig.bones.push(pillow);
+    let wardrobe=match character.id {
+        "bia"=>Some("geo/bia/bianude.geo.json"),
+        "jenny"=>Some("geo/jenny/jennynude.geo.json"),
+        "ellie"=>Some("geo/ellie/nude.geo.json"),
+        "slime"=>Some("geo/slime/nude.geo.json"),
+        _=>None,
+    };
+    if let Some(path)=wardrobe {
+        let nude=load_rig_variant(zip,character,path)?;
+        if character.id=="bia" {
+            // Preserve Bia's original pillow during anal_prepare/anal_wait.
+            if let Some(pillow)=nude.bones.iter().find(|b|b.name=="pillow") {
+                let mut pillow=pillow.clone();
+                pillow.children.clear();
+                rig.roots.push(rig.bones.len());
+                rig.bones.push(pillow);
+            }
         }
         rig.nude=Some(Box::new(nude));
     }
@@ -1149,7 +1163,7 @@ impl EntityRenderer for Renderer {
             // returning Ok without geometry avoids rendering a wrong vanilla model.
             return Ok(());
         };
-        let rig = if self.0 == 2 && bia_undressed(entity.id) {
+        let rig = if rig.nude.is_some() && bia_undressed(entity.id) {
             rig.nude.as_deref().unwrap_or(rig)
         } else { rig };
         let speed=entity.living.map_or(0.0,|l|l.walk_animation_speed);
@@ -1301,6 +1315,14 @@ mod tests {
         assert_eq!(BIA_ANA.first().copied(), Some("anal_start"));
         assert_eq!(BIA_ANA.last().copied(), Some("anal_cum"));
         assert!(!trigger_bia_sequence(17, "other"));
+    }
+    #[test]
+    fn original_wardrobe_rigs_are_character_specific() {
+        for kind in ["jenny","ellie","slime","bia"] {
+            assert!(matches!(kind,"jenny"|"ellie"|"slime"|"bia"));
+        }
+        assert_eq!(toggle_character_dress(0,"goblin"),None);
+        assert_eq!(toggle_character_dress(0,"galath"),None);
     }
     #[test]
     fn bia_outfit_switches_independently_by_entity() {
