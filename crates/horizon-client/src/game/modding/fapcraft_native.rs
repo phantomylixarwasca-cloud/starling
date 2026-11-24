@@ -68,8 +68,16 @@ static BIA_FIRST_PERSON: AtomicBool = AtomicBool::new(true);
 /// Pending one-shot camera change; cleared by the Android client tick, not
 /// by the integrated server's render-independent state machine.
 static BIA_INITIAL_POV: AtomicBool = AtomicBool::new(false);
+static BIA_CLIENT_WAS_PAIRED: AtomicBool = AtomicBool::new(false);
 pub(crate) fn take_bia_initial_pov()->bool {
-    BIA_INITIAL_POV.swap(false,Ordering::Relaxed)
+    // A server-side trigger can be set before client initialization and was
+    // sometimes lost in the mobile build. The client independently detects
+    // the first tick of a paired scene; subsequent perspective toggles are
+    // never overridden by this one-time request.
+    let active=bia_session_active();
+    let previous=BIA_CLIENT_WAS_PAIRED.swap(active,Ordering::Relaxed);
+    let requested=BIA_INITIAL_POV.swap(false,Ordering::Relaxed);
+    active && (!previous || requested)
 }
 static BIA_JUMP_HELD: AtomicBool = AtomicBool::new(false);
 static BIA_FINISH_REQUEST: AtomicBool = AtomicBool::new(false);
@@ -397,17 +405,23 @@ fn social_pose(id: u32) -> Option<(SocialAction, f32)> {
         return Some((state.action,0.0));
     }
     let fast=BIA_FAST.load(Ordering::Relaxed);
+    // e0.java uses GeckoLib keyframe events, not the declared clip length:
+    //   doggySwitch @ 0.375 in soft -> hard when Shift is held;
+    //   doggyReset  @ 0.625 in hard -> another hard variation.
+    // Every hard*.animation_length is 2.04167 s, but allowing it to
+    // finish made the Rust fast mode slower than Java and Ana.
     let next_loop=match state.action {
         SocialAction::Clip("anal_slow") if fast => Some("anal_fast"),
         SocialAction::Clip("anal_fast") if !fast => Some("anal_slow"),
-        SocialAction::Clip("prone_doggy_soft") if fast => Some("prone_doggy_hard1"),
+        SocialAction::Clip("prone_doggy_soft") if fast && current>=0.375 =>
+            Some("prone_doggy_hard1"),
         SocialAction::Clip("prone_doggy_hard1"|"prone_doggy_hard2"|"prone_doggy_hard3")
             if !fast => Some("prone_doggy_soft"),
-        SocialAction::Clip("prone_doggy_hard1") if current>=state.duration =>
+        SocialAction::Clip("prone_doggy_hard1") if current>=0.625 =>
             Some("prone_doggy_hard2"),
-        SocialAction::Clip("prone_doggy_hard2") if current>=state.duration =>
+        SocialAction::Clip("prone_doggy_hard2") if current>=0.625 =>
             Some("prone_doggy_hard3"),
-        SocialAction::Clip("prone_doggy_hard3") if current>=state.duration =>
+        SocialAction::Clip("prone_doggy_hard3") if current>=0.625 =>
             Some("prone_doggy_hard1"),
         _=>None,
     };
@@ -1196,6 +1210,19 @@ mod tests {
         assert!(!BIA_FIRST_PERSON.load(Ordering::Relaxed));
         set_bia_jump(false);
         assert!(!BIA_JUMP_HELD.load(Ordering::Relaxed));
+    }
+    #[test]
+    fn bia_keyframe_timings_match_original_assets() {
+        let rig=rigs().get(2).and_then(Option::as_ref);
+        if let Some(rig)=rig {
+            let soft=rig.actions.get("prone_doggy_soft").unwrap();
+            let hard=rig.actions.get("prone_doggy_hard1").unwrap();
+            assert!(soft.sound_cues.iter().any(|cue|
+                cue.effect=="doggySwitch" && (cue.time-0.375).abs()<0.001));
+            assert!(hard.sound_cues.iter().any(|cue|
+                cue.effect=="doggyReset" && (cue.time-0.625).abs()<0.001));
+            assert!(hard.duration>0.625);
+        }
     }
     #[test]
     fn bia_fast_toggle_is_explicit() {
