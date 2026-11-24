@@ -42,7 +42,8 @@ env:
   PREVIEW: ${{ !(github.repository == 'starling-client/starling' && (startsWith(github.ref, 'refs/tags/v') || inputs.release_key)) && 'true' || 'false' }}
 concurrency:
   group: android-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Latest ARM64 preview replaces stale queued builds on the test branch.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/android' }}
 jobs:
   apk:
     strategy:
