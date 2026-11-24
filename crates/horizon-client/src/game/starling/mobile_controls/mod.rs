@@ -332,16 +332,16 @@ impl Game<'_> {
             }
         }
         self.pad.set_touch_state(state);
-        // The chat and camera buttons act as their mappings, not as the D-pad buttons that held
-        // them: Horizon's controller layout moved chat to D-pad up and the radial menu to right.
-        for (requested, action) in [(chat, "key.chat"), (perspective, "key.togglePerspective")] {
-            if requested
-                && let Err(e) = self
-                    .pad_action(action, true)
-                    .and_then(|()| self.pad_action(action, false))
-            {
-                log::warn!("Starling: touch {action}: {e:#}");
-            }
+        // Chat keeps its normal mapping. A dedicated perspective button is
+        // a direct UI action, not a synthetic F5 press/release pair.
+        if chat
+            && let Err(e) = self.pad_action("key.chat", true)
+                .and_then(|()| self.pad_action("key.chat", false))
+        {
+            log::warn!("Starling: touch key.chat: {e:#}");
+        }
+        if perspective && self.screen == Screen::Playing && !self.replay.playing() {
+            self.cycle_camera_from_touch();
         }
         if debug {
             self.debug_key(KeyCode::F3, KeyAction::Press);

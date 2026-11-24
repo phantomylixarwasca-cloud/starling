@@ -290,6 +290,16 @@ impl Game<'_> {
         self.native_camera_type_cycle(previous, &mut next);
         self.apply_camera_type(next);
     }
+    /// The dedicated touch UI cycles all three built-in views once per tap.
+    /// Unlike a remappable keyboard shortcut, it does not allow a key hook
+    /// to substitute a different view or a pending request to skip a step.
+    #[cfg(any(target_os = "android", test))]
+    pub(in crate::game) fn cycle_camera_from_touch(&mut self) {
+        let previous = self.camera_type;
+        let next = previous.cycle();
+        self.apply_camera_type(next);
+        log::info!("Starling: touch perspective {previous:?} -> {next:?}");
+    }
     /// `Options.setCameraType`, then `Minecraft.handleKeybinds`' check: the chain
     /// follows the first-person view.
     pub(super) fn apply_camera_type(&mut self, camera_type: CameraType) {

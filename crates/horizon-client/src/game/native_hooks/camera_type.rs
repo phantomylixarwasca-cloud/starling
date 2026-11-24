@@ -94,6 +94,28 @@ mod camera_type_tests {
         );
     }
 
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn touch_perspective_visits_all_three_views_despite_key_hook() {
+        use CameraType::*;
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let mods: mod_api::Mods = vec![ModEntry::new(
+            "no-front",
+            Box::new(NoFront(Arc::clone(&heard))),
+        )].into();
+        with_mods(mods, || {
+            crate::game::native_entity_refs::tests::with_game(|game| {
+                game.options.execution_role = super::ExecutionRole::Client;
+                for expected in [ThirdPersonBack, ThirdPersonFront, FirstPerson] {
+                    game.set_camera_type(ThirdPersonFront);
+                    game.cycle_camera_from_touch();
+                    assert_eq!(game.camera_type(), expected);
+                }
+            });
+        });
+        assert!(heard.lock().unwrap().is_empty());
+    }
+
     #[derive(Default)]
     struct Calls {
         poses: std::sync::atomic::AtomicUsize,
