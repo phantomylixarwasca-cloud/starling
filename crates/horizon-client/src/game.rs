@@ -8376,7 +8376,12 @@ impl Game<'_> {
         self.apply_requested_camera_type();
         let vanilla = self.camera_view(camera_alpha as f32);
         let view = vanilla.map(|view| {
-            if self.shows_panorama() || self.studio.flying() {
+            if self.shows_panorama() || self.studio.flying()
+                || fapcraft_native::bia_session_active() {
+                // During Bia's paired scene, Camera.update already uses
+                // the animated Steve head as the camera entity. External
+                // camera-pose hooks must not move that view back to the
+                // invisible local player's approach tile.
                 view
             } else {
                 self.native_camera_pose_now(camera_alpha as f32, view)
