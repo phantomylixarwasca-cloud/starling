@@ -21,6 +21,21 @@ impl Game<'_> {
     ) -> horizon_client::sprint::Keys {
         // Starling: the old hook first, for the mods made for it (native_compat.rs).
         keys = self.old_movement_keys(keys);
+        // The player's controls are temporarily owned by the paired Bia
+        // animation. Keep Shift and Jump for the original fast/finish
+        // keyframes, but discard translation/sprint before player physics,
+        // pathing and the LAN movement packet are computed. Otherwise the
+        // hidden local avatar can walk away from its Steve scene anchor.
+        if crate::game::fapcraft_native::bia_session_active() {
+            keys.forward=false;
+            keys.backward=false;
+            keys.left=false;
+            keys.right=false;
+            keys.sprint=false;
+            keys.sprint_suppressed=true;
+            keys.analog=None;
+            return keys;
+        }
         if !mod_api::__private::enabled_listened(mod_api::HookId::MovementInput) {
             return keys;
         }
